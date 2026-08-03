@@ -55,8 +55,8 @@ LANGUAGES = {
         "software_info_title": "ℹ️ Thông tin phần mềm",
         "software_info_body": """
         **Ứng dụng:** Nexus Messenger
-        **Phiên bản:** 2.3.0
-        **Tính năng:** Xem trực tiếp Ảnh, Video, Audio. Thanh tải tệp ghim dưới cùng kèm ô chat.
+        **Phiên bản:** 2.3.1
+        **Tính năng:** Xem trực tiếp Ảnh, Video, Audio. Ô tải file đặt ngay phía dưới khu vực chat.
         **Giới hạn truyền tải:** Tệp đính kèm < 25MB
         **Bảo mật:** Mật khẩu được mã hóa SHA-256 trước khi lưu trữ.
         """
@@ -108,8 +108,8 @@ LANGUAGES = {
         "software_info_title": "ℹ️ Software Info",
         "software_info_body": """
         **App:** Nexus Messenger
-        **Version:** 2.3.0
-        **Features:** Inline preview for media. Sticky bottom input with file uploader.
+        **Version:** 2.3.1
+        **Features:** Inline preview for media. Stable bottom file uploader layout.
         **Transfer Limit:** Attachments < 25MB
         **Security:** Passwords are encrypted via SHA-256.
         """
@@ -158,11 +158,11 @@ LANGUAGES = {
         "spinner_upload": "Subiendo archivo a GitHub...",
         "file_attached": "📂 Descargar documento:",
         "just_now": "Ahora mismo",
-        "software_info_title": "ℹ️ Info del Software",
+        "software_info_title": "ℹ " + "Info del Software",
         "software_info_body": """
         **Aplicación:** Nexus Messenger
-        **Versión:** 2.3.0
-        **Características:** Vista previa en línea. Barra de carga fijada abajo con el chat.
+        **Versión:** 2.3.1
+        **Características:** Vista previa en línea. Panel inferior estable para carga de archivos.
         **Límite de Envío:** Adjuntos < 25MB
         **Seguridad:** Contraseñas cifradas con SHA-256.
         """
@@ -281,7 +281,7 @@ if not st.session_state.logged_in:
             if not reg_user or not reg_pass:
                 st.warning(L["err_missing"])
             elif reg_pass != reg_confirm:
-                st.error(L["err_match"])
+                st.error(L["match"])
             elif any(u["username"] == reg_user for u in accounts):
                 st.error(L["err_exist"])
             else:
@@ -405,7 +405,7 @@ for msg in chat_history:
                (msg["user"] == selected_chat and msg.get("to") == st.session_state.username):
                 filtered_chats.append(msg)
 
-# Vùng chứa danh sách tin nhắn (cuộn độc lập)
+# Khung chứa hội thoại độc lập
 chat_container = st.container()
 
 with chat_container:
@@ -436,8 +436,10 @@ if selected_chat != L["public_room"] and selected_chat not in my_friends:
     st.error(L["err_not_friend"])
 
 if is_still_friend:
-    # KHỐI GHIM THANH TẢI LÊN XUỐNG DƯỚI CÙNG GHÈ KÈM Ô CHAT (DÙNG ST.BOTTOM)
-    with st.bottom():
+    # KHỐI TẠO BỐ CỤC PANEL NHẬP LIỆU DƯỚI CÙNG (DÙNG ST.CONTAINER)
+    input_panel = st.container()
+    
+    with input_panel:
         uploaded_file = st.file_uploader(L["file_uploader"], type=None, label_visibility="collapsed")
         file_url = None
         file_name = None
