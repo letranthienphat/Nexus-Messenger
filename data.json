@@ -1,16 +1,1 @@
-[
-    {
-        "user": "Phat",
-        "role": "user",
-        "time": "13:29:52 03/08/2026",
-        "text": "test",
-        "room": "public"
-    },
-    {
-        "user": "Phat",
-        "role": "user",
-        "time": "13:30:01 03/08/2026",
-        "text": "ok",
-        "room": "public"
-    }
-]
+[]
