@@ -55,8 +55,8 @@ LANGUAGES = {
         "software_info_title": "ℹ️ Thông tin phần mềm",
         "software_info_body": """
         **Ứng dụng:** Nexus Messenger
-        **Phiên bản:** 2.2.0
-        **Tính năng:** Xem trực tiếp Ảnh, Video, Audio trong hội thoại.
+        **Phiên bản:** 2.3.0
+        **Tính năng:** Xem trực tiếp Ảnh, Video, Audio. Thanh tải tệp ghim dưới cùng kèm ô chat.
         **Giới hạn truyền tải:** Tệp đính kèm < 25MB
         **Bảo mật:** Mật khẩu được mã hóa SHA-256 trước khi lưu trữ.
         """
@@ -108,8 +108,8 @@ LANGUAGES = {
         "software_info_title": "ℹ️ Software Info",
         "software_info_body": """
         **App:** Nexus Messenger
-        **Version:** 2.2.0
-        **Features:** Inline preview for Photos, Videos, and Audio.
+        **Version:** 2.3.0
+        **Features:** Inline preview for media. Sticky bottom input with file uploader.
         **Transfer Limit:** Attachments < 25MB
         **Security:** Passwords are encrypted via SHA-256.
         """
@@ -161,8 +161,8 @@ LANGUAGES = {
         "software_info_title": "ℹ️ Info del Software",
         "software_info_body": """
         **Aplicación:** Nexus Messenger
-        **Versión:** 2.2.0
-        **Características:** Vista previa en línea de Fotos, Videos y Audio.
+        **Versión:** 2.3.0
+        **Características:** Vista previa en línea. Barra de carga fijada abajo con el chat.
         **Límite de Envío:** Adjuntos < 25MB
         **Seguridad:** Contraseñas cifradas con SHA-256.
         """
@@ -405,35 +405,29 @@ for msg in chat_history:
                (msg["user"] == selected_chat and msg.get("to") == st.session_state.username):
                 filtered_chats.append(msg)
 
-# BỘ PHÂN LOẠI FILE ĐỂ XEM TRỰC TIẾP
-for msg in filtered_chats:
-    with st.chat_message(msg["role"]):
-        st.markdown(f"**{msg['user']}** <span style='color:gray; font-size:12px;'>• {msg['time']}</span>", unsafe_allow_html=True)
-        
-        # Hiển thị text tin nhắn nếu có
-        if msg["text"]: 
-            st.write(msg["text"])
+# Vùng chứa danh sách tin nhắn (cuộn độc lập)
+chat_container = st.container()
+
+with chat_container:
+    for msg in filtered_chats:
+        with st.chat_message(msg["role"]):
+            st.markdown(f"**{msg['user']}** <span style='color:gray; font-size:12px;'>• {msg['time']}</span>", unsafe_allow_html=True)
             
-        # Kiểm tra và xử lý hiển thị trực tiếp file đính kèm
-        if "file_url" in msg:
-            f_url = msg["file_url"]
-            f_name = msg["file_name"].lower()
-            
-            # 1. Trường hợp là HÌNH ẢNH
-            if f_name.endswith(('.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp')):
-                st.image(f_url, caption=msg["file_name"], use_container_width=True)
-            
-            # 2. Trường hợp là VIDEO
-            elif f_name.endswith(('.mp4', '.webm', '.mov', '.avi', '.mkv')):
-                st.video(f_url)
+            if msg["text"]: 
+                st.write(msg["text"])
                 
-            # 3. Trường hợp là FILE ÂM THANH (AUDIO)
-            elif f_name.endswith(('.mp3', '.wav', '.ogg', '.m4a', '.flac')):
-                st.audio(f_url)
+            if "file_url" in msg:
+                f_url = msg["file_url"]
+                f_name = msg["file_name"].lower()
                 
-            # 4. Các định dạng tài liệu khác (Tải về thông thường)
-            else:
-                st.markdown(f"{L['file_attached']} [{msg['file_name']}]({f_url})")
+                if f_name.endswith(('.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp')):
+                    st.image(f_url, caption=msg["file_name"], use_container_width=True)
+                elif f_name.endswith(('.mp4', '.webm', '.mov', '.avi', '.mkv')):
+                    st.video(f_url)
+                elif f_name.endswith(('.mp3', '.wav', '.ogg', '.m4a', '.flac')):
+                    st.audio(f_url)
+                else:
+                    st.markdown(f"{L['file_attached']} [{msg['file_name']}]({f_url})")
 
 # Kiểm tra điều kiện chat
 is_still_friend = True
@@ -442,42 +436,44 @@ if selected_chat != L["public_room"] and selected_chat not in my_friends:
     st.error(L["err_not_friend"])
 
 if is_still_friend:
-    uploaded_file = st.file_uploader(L["file_uploader"], type=None)
-    file_url = None
-    file_name = None
-    valid_file = False
-    
-    if uploaded_file is not None:
-        file_bytes = uploaded_file.read()
-        file_size_mb = len(file_bytes) / (1024 * 1024)
+    # KHỐI GHIM THANH TẢI LÊN XUỐNG DƯỚI CÙNG GHÈ KÈM Ô CHAT (DÙNG ST.BOTTOM)
+    with st.bottom():
+        uploaded_file = st.file_uploader(L["file_uploader"], type=None, label_visibility="collapsed")
+        file_url = None
+        file_name = None
+        valid_file = False
         
-        if file_size_mb > 25.0:
-            st.error(L["err_file_size"])
-        else:
-            file_name = uploaded_file.name
-            st.info(f"{L['info_file_ready']} {file_name} ({file_size_mb:.2f} MB)")
-            valid_file = True
+        if uploaded_file is not None:
+            file_bytes = uploaded_file.read()
+            file_size_mb = len(file_bytes) / (1024 * 1024)
+            
+            if file_size_mb > 25.0:
+                st.error(L["err_file_size"])
+            else:
+                file_name = uploaded_file.name
+                st.info(f"{L['info_file_ready']} {file_name} ({file_size_mb:.2f} MB)")
+                valid_file = True
 
-    if prompt := st.chat_input(L["chat_input"]):
-        if uploaded_file is not None and valid_file:
-            with st.spinner(L["spinner_upload"]):
-                file_url = upload_binary_file(file_name, file_bytes)
-        
-        new_message = {
-            "user": st.session_state.username,
-            "role": "user",
-            "time": datetime.now().strftime("%H:%M:%S %d/%m/%Y"),
-            "text": prompt,
-            "room": "public" if selected_chat == L["public_room"] else "private"
-        }
-        
-        if selected_chat != L["public_room"]:
-            new_message["to"] = selected_chat
+        if prompt := st.chat_input(L["chat_input"]):
+            if uploaded_file is not None and valid_file:
+                with st.spinner(L["spinner_upload"]):
+                    file_url = upload_binary_file(file_name, file_bytes)
             
-        if file_url:
-            new_message["file_url"] = file_url
-            new_message["file_name"] = file_name
+            new_message = {
+                "user": st.session_state.username,
+                "role": "user",
+                "time": datetime.now().strftime("%H:%M:%S %d/%m/%Y"),
+                "text": prompt,
+                "room": "public" if selected_chat == L["public_room"] else "private"
+            }
             
-        chat_history.append(new_message)
-        if save_github_file(CHAT_FILE, chat_history, chat_sha, message=f"Msg from {st.session_state.username}"):
-            st.rerun()
+            if selected_chat != L["public_room"]:
+                new_message["to"] = selected_chat
+                
+            if file_url:
+                new_message["file_url"] = file_url
+                new_message["file_name"] = file_name
+                
+            chat_history.append(new_message)
+            if save_github_file(CHAT_FILE, chat_history, chat_sha, message=f"Msg from {st.session_state.username}"):
+                st.rerun()
