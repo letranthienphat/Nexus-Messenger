@@ -45,13 +45,21 @@ LANGUAGES = {
         "btn_clear_chat": "🗑️ Xóa lịch sử Hộp thư chung",
         "success_clear": "Đã xóa lịch sử thành công!",
         "err_not_friend": "Bạn không thể nhắn tin do người này chưa kết bạn hoặc đã hủy kết bạn.",
-        "file_uploader": "Đính kèm file (Dưới 25MB):",
-        "err_file_size": "❌ Kích thước file vượt quá giới hạn 25MB của GitHub!",
-        "info_file_ready": "📁 Chuẩn bị tải lên:",
+        "file_uploader": "Đính kèm tệp tin đa phương tiện (Dưới 25MB):",
+        "err_file_size": "❌ File không hợp lệ! Kích thước file vượt quá giới hạn 25MB của GitHub. Vui lòng chọn file nhỏ hơn.",
+        "info_file_ready": "📁 Tệp hợp lệ, chuẩn bị tải lên:",
         "chat_input": "Nhập nội dung tin nhắn...",
         "spinner_upload": "Đăng tải file lên GitHub...",
-        "file_attached": "📂 File đính kèm:",
-        "just_now": "Vừa xong"
+        "file_attached": "📂 Tải về tài liệu:",
+        "just_now": "Vừa xong",
+        "software_info_title": "ℹ️ Thông tin phần mềm",
+        "software_info_body": """
+        **Ứng dụng:** Nexus Messenger
+        **Phiên bản:** 2.2.0
+        **Tính năng:** Xem trực tiếp Ảnh, Video, Audio trong hội thoại.
+        **Giới hạn truyền tải:** Tệp đính kèm < 25MB
+        **Bảo mật:** Mật khẩu được mã hóa SHA-256 trước khi lưu trữ.
+        """
     },
     "English": {
         "title": "💬 Nexus Messenger",
@@ -90,13 +98,21 @@ LANGUAGES = {
         "btn_clear_chat": "🗑️ Clear Public Chat History",
         "success_clear": "Cleared successfully!",
         "err_not_friend": "Cannot chat. You are not friends with this user.",
-        "file_uploader": "Attach file (Under 25MB):",
-        "err_file_size": "❌ File size exceeds GitHub's 25MB limit!",
-        "info_file_ready": "📁 Ready to upload:",
+        "file_uploader": "Attach media file (Under 25MB):",
+        "err_file_size": "❌ Invalid file! File size exceeds GitHub's 25MB limit. Please choose a smaller file.",
+        "info_file_ready": "📁 Valid file, ready to upload:",
         "chat_input": "Type a message...",
         "spinner_upload": "Uploading file to GitHub...",
-        "file_attached": "📂 Attachment:",
-        "just_now": "Just now"
+        "file_attached": "📂 Download Document:",
+        "just_now": "Just now",
+        "software_info_title": "ℹ️ Software Info",
+        "software_info_body": """
+        **App:** Nexus Messenger
+        **Version:** 2.2.0
+        **Features:** Inline preview for Photos, Videos, and Audio.
+        **Transfer Limit:** Attachments < 25MB
+        **Security:** Passwords are encrypted via SHA-256.
+        """
     },
     "Español": {
         "title": "💬 Nexus Messenger",
@@ -135,13 +151,21 @@ LANGUAGES = {
         "btn_clear_chat": "🗑️ Borrar Historial Público",
         "success_clear": "¡Borrado con éxito!",
         "err_not_friend": "No puedes chatear. No son amigos.",
-        "file_uploader": "Adjuntar archivo (Menos de 25MB):",
-        "err_file_size": "¡El archivo supera el límite de 25MB de GitHub!",
-        "info_file_ready": "📁 Listo para subir:",
+        "file_uploader": "Adjuntar archivo multimedia (Menos de 25MB):",
+        "err_file_size": "¡Archivo no válido! Supera el límite de 25MB de GitHub. Elija uno más pequeño.",
+        "info_file_ready": "📁 Archivo válido, listo para subir:",
         "chat_input": "Escribe un mensaje...",
         "spinner_upload": "Subiendo archivo a GitHub...",
-        "file_attached": "📂 Adjunto:",
-        "just_now": "Ahora mismo"
+        "file_attached": "📂 Descargar documento:",
+        "just_now": "Ahora mismo",
+        "software_info_title": "ℹ️ Info del Software",
+        "software_info_body": """
+        **Aplicación:** Nexus Messenger
+        **Versión:** 2.2.0
+        **Características:** Vista previa en línea de Fotos, Videos y Audio.
+        **Límite de Envío:** Adjuntos < 25MB
+        **Seguridad:** Contraseñas cifradas con SHA-256.
+        """
     }
 }
 
@@ -153,13 +177,11 @@ if "logged_in" not in st.session_state:
 if "username" not in st.session_state:
     st.session_state.username = ""
 
-# Đọc từ ngôn ngữ đã chọn
 L = LANGUAGES[st.session_state.lang]
 
-# Cấu hình giao diện Streamlit
 st.set_page_config(page_title="Nexus Messenger", page_icon="💬", layout="centered")
 
-# --- NÚT ĐỔI NGÔN NGỮ ĐẶT Ở ĐẦU SIDEBAR ---
+# --- ĐỔI NGÔN NGỮ Ở SIDEBAR ---
 st.sidebar.markdown("### 🌐 Language / Ngôn ngữ")
 selected_lang = st.sidebar.selectbox(
     "Select Language:", 
@@ -225,7 +247,7 @@ def upload_binary_file(file_name, file_bytes):
 def hash_password(password):
     return hashlib.sha256(password.encode()).hexdigest()
 
-# --- HỆ THỐNG ĐĂNG NHẬP / ĐĂNG KÝ (CÓ GHI NHỚ ĐĂNG NHẬP) ---
+# --- HỆ THỐNG ĐĂNG NHẬP / ĐĂNG KÝ ---
 if not st.session_state.logged_in:
     st.subheader(L["login_sub"])
     tab_login, tab_register = st.tabs([L["tab_login"], L["tab_register"]])
@@ -245,7 +267,6 @@ if not st.session_state.logged_in:
                 if user_found:
                     st.session_state.logged_in = True
                     st.session_state.username = login_user
-                    # Nếu người dùng chọn Ghi nhớ, trạng thái sẽ được giữ nguyên trong suốt phiên làm việc của trình duyệt
                     st.success(L["success_login"])
                     st.rerun()
                 else:
@@ -274,9 +295,13 @@ if not st.session_state.logged_in:
                 accounts.append(new_account)
                 if save_github_file(USER_FILE, accounts, user_sha, message=f"New user: {reg_user}"):
                     st.success(L["success_register"])
+                    
+    st.sidebar.write("---")
+    st.sidebar.subheader(L["software_info_title"])
+    st.sidebar.markdown(L["software_info_body"])
     st.stop()
 
-# --- GIAO DIỆN CHAT VÀ QUẢN LÝ BẠN BÈ (SAU KHI ĐĂNG NHẬP) ---
+# --- GIAO DIỆN CHAT VÀ QUẢN LÝ BẠN BÈ ---
 accounts, user_sha = load_github_file(USER_FILE)
 chat_history, chat_sha = load_github_file(CHAT_FILE)
 
@@ -289,7 +314,6 @@ if "friends" not in current_user_data: current_user_data["friends"] = []
 if "friend_requests_received" not in current_user_data: current_user_data["friend_requests_received"] = []
 if "friend_requests_sent" not in current_user_data: current_user_data["friend_requests_sent"] = []
 
-# --- SIDEBAR TIẾP TỤC ---
 st.sidebar.write("---")
 st.sidebar.markdown(f"### {L['sidebar_account']} **{st.session_state.username}**")
 if st.sidebar.button(L["btn_logout"], use_container_width=True):
@@ -353,7 +377,6 @@ st.sidebar.write("---")
 st.sidebar.subheader(L["sidebar_room"])
 my_friends = current_user_data.get("friends", [])
 
-# Thay đổi hiển thị tên Hộp thư chung dựa trên ngôn ngữ chọn
 chat_options = [L["public_room"]] + my_friends
 selected_chat = st.sidebar.selectbox("Chat:", chat_options, label_visibility="collapsed")
 
@@ -362,6 +385,10 @@ if selected_chat == L["public_room"]:
         if save_github_file(CHAT_FILE, [], chat_sha, message="Clear public"):
             st.success(L["success_clear"])
             st.rerun()
+
+st.sidebar.write("---")
+st.sidebar.subheader(L["software_info_title"])
+st.sidebar.markdown(L["software_info_body"])
 
 # --- GIAO DIỆN CHAT ---
 st.write(f"### {selected_chat}")
@@ -378,14 +405,35 @@ for msg in chat_history:
                (msg["user"] == selected_chat and msg.get("to") == st.session_state.username):
                 filtered_chats.append(msg)
 
+# BỘ PHÂN LOẠI FILE ĐỂ XEM TRỰC TIẾP
 for msg in filtered_chats:
     with st.chat_message(msg["role"]):
         st.markdown(f"**{msg['user']}** <span style='color:gray; font-size:12px;'>• {msg['time']}</span>", unsafe_allow_html=True)
-        if "file_url" in msg:
-            if msg["text"]: st.write(msg["text"])
-            st.markdown(f"{L['file_attached']} [{msg['file_name']}]({msg['file_url']})")
-        else:
+        
+        # Hiển thị text tin nhắn nếu có
+        if msg["text"]: 
             st.write(msg["text"])
+            
+        # Kiểm tra và xử lý hiển thị trực tiếp file đính kèm
+        if "file_url" in msg:
+            f_url = msg["file_url"]
+            f_name = msg["file_name"].lower()
+            
+            # 1. Trường hợp là HÌNH ẢNH
+            if f_name.endswith(('.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp')):
+                st.image(f_url, caption=msg["file_name"], use_container_width=True)
+            
+            # 2. Trường hợp là VIDEO
+            elif f_name.endswith(('.mp4', '.webm', '.mov', '.avi', '.mkv')):
+                st.video(f_url)
+                
+            # 3. Trường hợp là FILE ÂM THANH (AUDIO)
+            elif f_name.endswith(('.mp3', '.wav', '.ogg', '.m4a', '.flac')):
+                st.audio(f_url)
+                
+            # 4. Các định dạng tài liệu khác (Tải về thông thường)
+            else:
+                st.markdown(f"{L['file_attached']} [{msg['file_name']}]({f_url})")
 
 # Kiểm tra điều kiện chat
 is_still_friend = True
@@ -397,19 +445,21 @@ if is_still_friend:
     uploaded_file = st.file_uploader(L["file_uploader"], type=None)
     file_url = None
     file_name = None
+    valid_file = False
     
     if uploaded_file is not None:
         file_bytes = uploaded_file.read()
         file_size_mb = len(file_bytes) / (1024 * 1024)
+        
         if file_size_mb > 25.0:
             st.error(L["err_file_size"])
-            uploaded_file = None
         else:
             file_name = uploaded_file.name
             st.info(f"{L['info_file_ready']} {file_name} ({file_size_mb:.2f} MB)")
+            valid_file = True
 
     if prompt := st.chat_input(L["chat_input"]):
-        if uploaded_file is not None:
+        if uploaded_file is not None and valid_file:
             with st.spinner(L["spinner_upload"]):
                 file_url = upload_binary_file(file_name, file_bytes)
         
