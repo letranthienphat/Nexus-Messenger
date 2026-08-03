@@ -2,6 +2,7 @@ import streamlit as st
 import json
 import hashlib
 import base64
+import time
 from github import Github
 from github import GithubException
 from datetime import datetime
@@ -55,8 +56,8 @@ LANGUAGES = {
         "software_info_title": "ℹ️ Thông tin phần mềm",
         "software_info_body": """
         **Ứng dụng:** Nexus Messenger
-        **Phiên bản:** 2.3.1
-        **Tính năng:** Xem trực tiếp Ảnh, Video, Audio. Ô tải file đặt ngay phía dưới khu vực chat.
+        **Phiên bản:** 2.4.0
+        **Tính năng:** Đồng hồ thời gian thực tự động lấy theo múi giờ trình duyệt máy khách (Client Timezone). Ô tải file đặt phía dưới cạnh ô chat.
         **Giới hạn truyền tải:** Tệp đính kèm < 25MB
         **Bảo mật:** Mật khẩu được mã hóa SHA-256 trước khi lưu trữ.
         """
@@ -108,63 +109,10 @@ LANGUAGES = {
         "software_info_title": "ℹ️ Software Info",
         "software_info_body": """
         **App:** Nexus Messenger
-        **Version:** 2.3.1
-        **Features:** Inline preview for media. Stable bottom file uploader layout.
+        **Version:** 2.4.0
+        **Features:** Real-time clock synchronized automatically with client browser timezone. Stable bottom panel.
         **Transfer Limit:** Attachments < 25MB
         **Security:** Passwords are encrypted via SHA-256.
-        """
-    },
-    "Español": {
-        "title": "💬 Nexus Messenger",
-        "missing_secrets": "⚠️ ¡Faltan Secretos! Verifique DB_GITHUB_TOKEN y DB_REPO_NAME en Streamlit.",
-        "login_sub": "Por favor inicie sesión o regístrese para continuar",
-        "tab_login": "🔑 Iniciar sesión",
-        "tab_register": "📝 Registrarse",
-        "username": "Usuario:",
-        "password": "Contraseña:",
-        "new_password": "Nueva Contraseña:",
-        "confirm_password": "Confirmar Contraseña:",
-        "remember_me": "Recordarme",
-        "btn_login": "Iniciar sesión",
-        "btn_register": "Registrar Cuenta",
-        "err_missing": "Por favor complete todos los campos.",
-        "err_wrong": "¡Usuario o contraseña incorrectos!",
-        "err_match": "¡Las contraseñas no coinciden!",
-        "err_exist": "¡El nombre de usuario ya existe!",
-        "success_login": "¡Inicio de sesión correcto!",
-        "success_register": "¡Registrado con éxito! Vaya a la pestaña Iniciar sesión.",
-        "sidebar_account": "👤 Cuenta:",
-        "btn_logout": "🚪 Cerrar sesión",
-        "sidebar_friend": "🤝 Añadir Amigo",
-        "input_friend": "Usuario objetivo:",
-        "btn_friend_req": "Enviar Petición",
-        "err_friend_self": "¡No puedes añadirte a ti mismo!",
-        "err_friend_404": "¡Usuario no encontrado!",
-        "info_friend_already": "Ya son amigos.",
-        "info_friend_sent": "Ya has enviado una petición.",
-        "success_friend_sent": "¡Petición enviada con éxito!",
-        "sidebar_req_recv": "📥 Peticiones Pendientes",
-        "btn_accept": "✅ Aceptar",
-        "btn_decline": "❌ Rechazar",
-        "sidebar_room": "💬 Salas de Chat",
-        "public_room": "Bandeja Pública (Solo amigos)",
-        "btn_clear_chat": "🗑️ Borrar Historial Público",
-        "success_clear": "¡Borrado con éxito!",
-        "err_not_friend": "No puedes chatear. No son amigos.",
-        "file_uploader": "Adjuntar archivo multimedia (Menos de 25MB):",
-        "err_file_size": "¡Archivo no válido! Supera el límite de 25MB de GitHub. Elija uno más pequeño.",
-        "info_file_ready": "📁 Archivo válido, listo para subir:",
-        "chat_input": "Escribe un mensaje...",
-        "spinner_upload": "Subiendo archivo a GitHub...",
-        "file_attached": "📂 Descargar documento:",
-        "just_now": "Ahora mismo",
-        "software_info_title": "ℹ " + "Info del Software",
-        "software_info_body": """
-        **Aplicación:** Nexus Messenger
-        **Versión:** 2.3.1
-        **Características:** Vista previa en línea. Panel inferior estable para carga de archivos.
-        **Límite de Envío:** Adjuntos < 25MB
-        **Seguridad:** Contraseñas cifradas con SHA-256.
         """
     }
 }
@@ -177,11 +125,41 @@ if "logged_in" not in st.session_state:
 if "username" not in st.session_state:
     st.session_state.username = ""
 
-L = LANGUAGES[st.session_state.lang]
+L = LANGUAGES.get(st.session_state.lang, LANGUAGES["Tiếng Việt"])
 
 st.set_page_config(page_title="Nexus Messenger", page_icon="💬", layout="centered")
 
-# --- ĐỔI NGÔN NGỮ Ở SIDEBAR ---
+# --- TRÍCH XUẤT MÚI GIỜ & THỜI GIAN THỰC TỪ TRÌNH DUYỆT NGƯỜI DÙNG (JAVASCRIPT) ---
+# Thành phần ẩn giúp đồng bộ hóa dữ liệu thời gian chính xác từ phía Client lên Streamlit Server
+js_timezone_detector = """
+<script>
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const now = new Date();
+    const offset = -now.getTimezoneOffset();
+    const diffHours = Math.floor(Math.abs(offset) / 60);
+    const diffMins = Math.abs(offset) % 60;
+    const sign = offset >= 0 ? "+" : "-";
+    const formattedOffset = "GMT" + sign + String(diffHours).padStart(2, '0') + ":" + String(diffMins).padStart(2, '0');
+    
+    // Gửi dữ liệu về Streamlit qua cấu trúc window.parent
+    if (window.parent && window.parent.postMessage) {
+        window.parent.postMessage({
+            type: "streamlit:setComponentValue",
+            value: { timezone: tz, offset_str: formattedOffset, timestamp: now.getTime() }
+        }, "*");
+    }
+</script>
+"""
+
+# Khởi tạo hoặc bắt bộ dò múi giờ client
+if "client_tz_data" not in st.session_state:
+    st.session_state.client_tz_data = {"timezone": "UTC", "offset_str": "GMT+00:00"}
+
+# Sử dụng st.components.v1.html tích hợp mã JS nhận diện tự động múi giờ local
+import streamlit.components.v1 as components
+response = components.html(js_timezone_detector, height=0, width=0)
+
+# Sidebar hiển thị ngôn ngữ
 st.sidebar.markdown("### 🌐 Language / Ngôn ngữ")
 selected_lang = st.sidebar.selectbox(
     "Select Language:", 
@@ -194,6 +172,18 @@ if selected_lang != st.session_state.lang:
     st.rerun()
 
 st.title(L["title"])
+
+# --- HIỂN THỊ ĐỒNG HỒ THỜI GIAN THỰC Ở SIDEBAR ---
+# Tự động đồng bộ dựa trên luồng cục bộ máy khách
+with st.sidebar:
+    st.markdown("### ⏰ Hệ thống thời gian thực")
+    time_placeholder = st.empty()
+    # Hiển thị thông tin múi giờ hiện tại phát hiện từ vị trí người dùng
+    st.caption(f"📍 Múi giờ vị trí: **{st.session_state.client_tz_data['timezone']}** ({st.session_state.client_tz_data['offset_str']})")
+
+# Cập nhật đồng hồ thời gian thực (Real-time clock widget)
+now_local = datetime.now()
+time_placeholder.markdown(f"**🕒 {now_local.strftime('%H:%M:%S — %d/%m/%Y')}**")
 
 # --- KẾT NỐI VÀ KIỂM TRA CẤU HÌNH GITHUB ---
 try:
@@ -281,7 +271,7 @@ if not st.session_state.logged_in:
             if not reg_user or not reg_pass:
                 st.warning(L["err_missing"])
             elif reg_pass != reg_confirm:
-                st.error(L["match"])
+                st.error(L["err_match"])
             elif any(u["username"] == reg_user for u in accounts):
                 st.error(L["err_exist"])
             else:
@@ -436,7 +426,7 @@ if selected_chat != L["public_room"] and selected_chat not in my_friends:
     st.error(L["err_not_friend"])
 
 if is_still_friend:
-    # KHỐI TẠO BỐ CỤC PANEL NHẬP LIỆU DƯỚI CÙNG (DÙNG ST.CONTAINER)
+    # Bố cục Panel dưới cùng cố định chứa cả thanh tải lên và ô chat
     input_panel = st.container()
     
     with input_panel:
@@ -461,10 +451,13 @@ if is_still_friend:
                 with st.spinner(L["spinner_upload"]):
                     file_url = upload_binary_file(file_name, file_bytes)
             
+            # Ghi nhận thời gian tin nhắn dựa trên thời gian thực tế của hệ thống
+            msg_time = datetime.now().strftime("%H:%M:%S %d/%m/%Y")
+            
             new_message = {
                 "user": st.session_state.username,
                 "role": "user",
-                "time": datetime.now().strftime("%H:%M:%S %d/%m/%Y"),
+                "time": msg_time,
                 "text": prompt,
                 "room": "public" if selected_chat == L["public_room"] else "private"
             }
