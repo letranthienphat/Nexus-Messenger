@@ -2,10 +2,10 @@ import streamlit as st
 import json
 import hashlib
 import base64
-import time
 from github import Github
 from github import GithubException
 from datetime import datetime
+import zoneinfo  # Thư viện chuẩn hỗ trợ xử lý múi giờ toàn cầu
 
 # --- ĐỊNH NGHĨA ĐA NGÔN NGỮ ---
 LANGUAGES = {
@@ -56,8 +56,8 @@ LANGUAGES = {
         "software_info_title": "ℹ️ Thông tin phần mềm",
         "software_info_body": """
         **Ứng dụng:** Nexus Messenger
-        **Phiên bản:** 2.4.0
-        **Tính năng:** Đồng hồ thời gian thực tự động lấy theo múi giờ trình duyệt máy khách (Client Timezone). Ô tải file đặt phía dưới cạnh ô chat.
+        **Phiên bản:** 2.5.0
+        **Tính năng:** Tự động đồng bộ thời gian thực theo múi giờ trình duyệt máy khách (Client Timezone). Ô tải file đặt phía dưới cạnh ô chat.
         **Giới hạn truyền tải:** Tệp đính kèm < 25MB
         **Bảo mật:** Mật khẩu được mã hóa SHA-256 trước khi lưu trữ.
         """
@@ -109,8 +109,8 @@ LANGUAGES = {
         "software_info_title": "ℹ️ Software Info",
         "software_info_body": """
         **App:** Nexus Messenger
-        **Version:** 2.4.0
-        **Features:** Real-time clock synchronized automatically with client browser timezone. Stable bottom panel.
+        **Version:** 2.5.0
+        **Features:** Auto-detect and sync chat timestamps with client browser timezone. Stable bottom panel.
         **Transfer Limit:** Attachments < 25MB
         **Security:** Passwords are encrypted via SHA-256.
         """
@@ -124,42 +124,37 @@ if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
 if "username" not in st.session_state:
     st.session_state.username = ""
+if "client_timezone" not in st.session_state:
+    st.session_state.client_timezone = "Asia/Ho_Chi_Minh" # Múi giờ mặc định dự phòng
 
 L = LANGUAGES.get(st.session_state.lang, LANGUAGES["Tiếng Việt"])
 
 st.set_page_config(page_title="Nexus Messenger", page_icon="💬", layout="centered")
 
-# --- TRÍCH XUẤT MÚI GIỜ & THỜI GIAN THỰC TỪ TRÌNH DUYỆT NGƯỜI DÙNG (JAVASCRIPT) ---
-# Thành phần ẩn giúp đồng bộ hóa dữ liệu thời gian chính xác từ phía Client lên Streamlit Server
-js_timezone_detector = """
+# --- TRÍCH XUẤT MÚI GIỜ BẰNG JAVASCRIPT KHÔNG HIỂN THỊ (BẰNG ST.COMPONENTS VÀ KHÔNG GÂY LỖI ST.BOTTOM) ---
+# Đoạn mã lấy tên múi giờ thực tế từ trình duyệt gửi thẳng vào cookie/URL hoặc biến Streamlit
+import streamlit.components.v1 as components
+
+# Sử dụng một thành phần HTML vô hình chạy JavaScript bắt múi giờ máy khách gửi ngược về Streamlit
+js_code = """
 <script>
     const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
-    const now = new Date();
-    const offset = -now.getTimezoneOffset();
-    const diffHours = Math.floor(Math.abs(offset) / 60);
-    const diffMins = Math.abs(offset) % 60;
-    const sign = offset >= 0 ? "+" : "-";
-    const formattedOffset = "GMT" + sign + String(diffHours).padStart(2, '0') + ":" + String(diffMins).padStart(2, '0');
-    
-    // Gửi dữ liệu về Streamlit qua cấu trúc window.parent
-    if (window.parent && window.parent.postMessage) {
+    const shareToStreamlit = () => {
         window.parent.postMessage({
             type: "streamlit:setComponentValue",
-            value: { timezone: tz, offset_str: formattedOffset, timestamp: now.getTime() }
+            value: tz
         }, "*");
-    }
+    };
+    // Đảm bảo Streamlit đã sẵn sàng nhận giá trị
+    setTimeout(shareToStreamlit, 200);
 </script>
 """
+# Lưu giá trị nhận được từ Component vào session_state
+detected_tz = components.html(js_code, height=0, width=0)
+if detected_tz and isinstance(detected_tz, str):
+    st.session_state.client_timezone = detected_tz
 
-# Khởi tạo hoặc bắt bộ dò múi giờ client
-if "client_tz_data" not in st.session_state:
-    st.session_state.client_tz_data = {"timezone": "UTC", "offset_str": "GMT+00:00"}
-
-# Sử dụng st.components.v1.html tích hợp mã JS nhận diện tự động múi giờ local
-import streamlit.components.v1 as components
-response = components.html(js_timezone_detector, height=0, width=0)
-
-# Sidebar hiển thị ngôn ngữ
+# --- ĐỔI NGÔN NGỮ Ở SIDEBAR ---
 st.sidebar.markdown("### 🌐 Language / Ngôn ngữ")
 selected_lang = st.sidebar.selectbox(
     "Select Language:", 
@@ -173,17 +168,17 @@ if selected_lang != st.session_state.lang:
 
 st.title(L["title"])
 
-# --- HIỂN THỊ ĐỒNG HỒ THỜI GIAN THỰC Ở SIDEBAR ---
-# Tự động đồng bộ dựa trên luồng cục bộ máy khách
+# --- HIỂN THỊ ĐỒNG HỒ THỜI GIAN THỰC THEO MÚI GIỜ NGƯỜI DÙNG Ở SIDEBAR ---
 with st.sidebar:
-    st.markdown("### ⏰ Hệ thống thời gian thực")
-    time_placeholder = st.empty()
-    # Hiển thị thông tin múi giờ hiện tại phát hiện từ vị trí người dùng
-    st.caption(f"📍 Múi giờ vị trí: **{st.session_state.client_tz_data['timezone']}** ({st.session_state.client_tz_data['offset_str']})")
-
-# Cập nhật đồng hồ thời gian thực (Real-time clock widget)
-now_local = datetime.now()
-time_placeholder.markdown(f"**🕒 {now_local.strftime('%H:%M:%S — %d/%m/%Y')}**")
+    st.markdown("### ⏰ Thời gian hệ thống")
+    try:
+        tz_obj = zoneinfo.ZoneInfo(st.session_state.client_timezone)
+        now_local = datetime.now(tz_obj)
+    except Exception:
+        now_local = datetime.now() # Dự phòng nếu lỗi thư viện múi giờ
+    
+    st.markdown(f"**🕒 {now_local.strftime('%H:%M:%S — %d/%m/%Y')}**")
+    st.caption(f"📍 Vị trí múi giờ phát hiện: `{st.session_state.client_timezone}`")
 
 # --- KẾT NỐI VÀ KIỂM TRA CẤU HÌNH GITHUB ---
 try:
@@ -426,7 +421,7 @@ if selected_chat != L["public_room"] and selected_chat not in my_friends:
     st.error(L["err_not_friend"])
 
 if is_still_friend:
-    # Bố cục Panel dưới cùng cố định chứa cả thanh tải lên và ô chat
+    # Bố cục Panel dưới cùng cố định chứa cả thanh tải lên và ô chat (Dùng container để tương thích mọi phiên bản)
     input_panel = st.container()
     
     with input_panel:
@@ -451,8 +446,12 @@ if is_still_friend:
                 with st.spinner(L["spinner_upload"]):
                     file_url = upload_binary_file(file_name, file_bytes)
             
-            # Ghi nhận thời gian tin nhắn dựa trên thời gian thực tế của hệ thống
-            msg_time = datetime.now().strftime("%H:%M:%S %d/%m/%Y")
+            # Ghi nhận thời gian tin nhắn dựa trên múi giờ thực tế của trình duyệt người dùng
+            try:
+                tz_obj = zoneinfo.ZoneInfo(st.session_state.client_timezone)
+                msg_time = datetime.now(tz_obj).strftime("%H:%M:%S %d/%m/%Y")
+            except Exception:
+                msg_time = datetime.now().strftime("%H:%M:%S %d/%m/%Y")
             
             new_message = {
                 "user": st.session_state.username,
