@@ -1,14 +1,19 @@
 """
-LTTP Messenger v3.2.1 - Smart Polling (FIXED)
-==============================================
-Fixed: @st.fragment run_every không nhận callable → dùng throttle nội bộ.
+LTTP Messenger v3.3 - Community Room + Remember Me
+===================================================
+• Unified "Chat với cộng đồng" (user + guest chung 1 phòng)
+• Remember Me dùng HMAC-signed token qua query params (30 ngày)
+• Smart polling với throttled fragment (fix v3.2.1)
 """
 
 import streamlit as st
 import json
 import hashlib
+import hmac
 import time
 import re
+import base64
+import secrets
 from github import Github, GithubException
 from datetime import datetime
 import zoneinfo
@@ -17,14 +22,16 @@ import zoneinfo
 #  CONFIG
 # ═══════════════════════════════════════════════════════════════
 APP_NAME = "LTTP Messenger"
-APP_VERSION = "3.2.1 (Smart Polling)"
+APP_VERSION = "3.3.0 (Community + Remember)"
 MAX_FILE_MB = 25
 MAX_CHAT_ENTRIES = 800
 SESSION_TIMEOUT_MIN = 60
 GUEST_PREFIX = "guest_"
-GUEST_ROOM = "__guest_lobby__"
+COMMUNITY_ROOM = "__community__"      # gộp public + guest
 ONLINE_WINDOW_SEC = 300
 LAST_SEEN_SAVE_INTERVAL = 120
+REMEMBER_DAYS = 30
+REMEMBER_COOKIE_KEY = "_lttp_rmb"
 
 POLL_FAST = 1
 POLL_MED = 3
@@ -55,6 +62,7 @@ def init_state():
         "poll_interval": POLL_FAST,
         "last_poll_ts": 0.0,
         "force_refresh": True,
+        "remember_token": "",
     }
     for k, v in defaults.items():
         st.session_state.setdefault(k, v)
@@ -62,7 +70,7 @@ def init_state():
 init_state()
 
 # ═══════════════════════════════════════════════════════════════
-#  i18n (rút gọn — giữ nguyên từ bản trước)
+#  i18n
 # ═══════════════════════════════════════════════════════════════
 LANGUAGES = {
     "Tiếng Việt": {
@@ -71,11 +79,13 @@ LANGUAGES = {
         "logout": "Đăng xuất",
         "username": "Tên đăng nhập", "password": "Mật khẩu",
         "new_password": "Mật khẩu mới", "confirm_password": "Xác nhận mật khẩu",
+        "remember_me": "Ghi nhớ đăng nhập 30 ngày",
         "btn_login": "🔓 Đăng nhập", "btn_register": "✨ Tạo tài khoản",
         "btn_guest": "🎭 Vào với tư cách khách",
         "guest_name": "Tên hiển thị của bạn",
-        "guest_note": "Chế độ khách: chỉ chat ở sảnh khách, không kết bạn, không lưu tin nhắn riêng.",
-        "guest_room": "🎭 Sảnh khách",
+        "guest_note": "Chế độ khách: chat chung với cộng đồng, không kết bạn, không lưu tin riêng.",
+        "community_room": "🌐 Chat với cộng đồng",
+        "community_sub": "Tất cả mọi người (đã đăng ký + khách) cùng trò chuyện",
         "err_guest_name": "Tên khách phải từ 2-20 ký tự, không chứa ký tự đặc biệt.",
         "err_missing": "Vui lòng nhập đầy đủ thông tin.",
         "err_wrong": "Sai tên đăng nhập hoặc mật khẩu.",
@@ -85,7 +95,6 @@ LANGUAGES = {
         "err_password_short": "Mật khẩu phải từ 6 ký tự.",
         "success_register": "Đăng ký thành công! Hãy đăng nhập.",
         "sidebar_rooms": "Phòng chat",
-        "public_room": "🌐 Hộp thư chung",
         "friends": "Bạn bè",
         "add_friend": "Kết bạn",
         "friend_username": "Tên người dùng",
@@ -102,8 +111,7 @@ LANGUAGES = {
         "send_file": "Gửi tệp",
         "err_file_size": f"Tệp vượt quá {MAX_FILE_MB}MB.",
         "uploading": "Đang tải lên...",
-        "err_not_friend": "Bạn không thể nhắn tin với người này.",
-        "clear_chat": "Xóa lịch sử",
+        "clear_chat": "Xóa lịch sử cộng đồng",
         "success_clear": "Đã xóa lịch sử.",
         "no_messages": "Chưa có tin nhắn nào. Hãy bắt đầu cuộc trò chuyện!",
         "online": "Đang hoạt động",
@@ -112,13 +120,14 @@ LANGUAGES = {
         "reply": "Trả lời",
         "cancel_reply": "Hủy",
         "session_expired": "Phiên đăng nhập đã hết hạn.",
-        "missing_secrets": "Thiếu cấu hình Secrets (DB_GITHUB_TOKEN, DB_REPO_NAME).",
+        "missing_secrets": "Thiếu cấu hình Secrets (DB_GITHUB_TOKEN, DB_REPO_NAME, DB_SECRET_KEY).",
         "emoji": "Cảm xúc",
         "online_users": "online",
         "guest_badge": "🎭 Khách",
-        "guest_leave": "🚪 Rời sảnh khách",
+        "guest_leave": "🚪 Rời phòng",
         "search_clear": "Xóa tìm kiếm",
-        "poll_status": "Poll",
+        "welcome_back": "👋 Chào mừng trở lại",
+        "auto_login": "🔄 Đang tự động đăng nhập...",
     },
     "English": {
         "app_tagline": "Fast, secure, unlimited chat.",
@@ -126,11 +135,13 @@ LANGUAGES = {
         "logout": "Logout",
         "username": "Username", "password": "Password",
         "new_password": "New password", "confirm_password": "Confirm password",
+        "remember_me": "Remember me for 30 days",
         "btn_login": "🔓 Sign in", "btn_register": "✨ Create account",
         "btn_guest": "🎭 Continue as guest",
         "guest_name": "Your display name",
-        "guest_note": "Guest mode: chat in guest lobby only, no friends, no private messages.",
-        "guest_room": "🎭 Guest Lobby",
+        "guest_note": "Guest mode: chat with the whole community, no friends, no private messages.",
+        "community_room": "🌐 Community Chat",
+        "community_sub": "Everyone (registered + guests) chats together",
         "err_guest_name": "Guest name: 2-20 chars, no special characters.",
         "err_missing": "Please fill in all fields.",
         "err_wrong": "Incorrect username or password.",
@@ -140,7 +151,6 @@ LANGUAGES = {
         "err_password_short": "Password must be at least 6 characters.",
         "success_register": "Registered! Please sign in.",
         "sidebar_rooms": "Chat rooms",
-        "public_room": "🌐 Public Box",
         "friends": "Friends",
         "add_friend": "Add friend",
         "friend_username": "Username",
@@ -157,8 +167,7 @@ LANGUAGES = {
         "send_file": "Send file",
         "err_file_size": f"File exceeds {MAX_FILE_MB}MB.",
         "uploading": "Uploading...",
-        "err_not_friend": "You cannot chat with this user.",
-        "clear_chat": "Clear history",
+        "clear_chat": "Clear community history",
         "success_clear": "History cleared.",
         "no_messages": "No messages yet. Start the conversation!",
         "online": "Online",
@@ -167,13 +176,14 @@ LANGUAGES = {
         "reply": "Reply",
         "cancel_reply": "Cancel",
         "session_expired": "Session expired.",
-        "missing_secrets": "Missing secrets (DB_GITHUB_TOKEN, DB_REPO_NAME).",
+        "missing_secrets": "Missing secrets (DB_GITHUB_TOKEN, DB_REPO_NAME, DB_SECRET_KEY).",
         "emoji": "Emoji",
         "online_users": "online",
         "guest_badge": "🎭 Guest",
-        "guest_leave": "🚪 Leave guest lobby",
+        "guest_leave": "🚪 Leave room",
         "search_clear": "Clear search",
-        "poll_status": "Poll",
+        "welcome_back": "👋 Welcome back",
+        "auto_login": "🔄 Auto-logging in...",
     },
 }
 L = LANGUAGES[st.session_state.lang]
@@ -282,9 +292,9 @@ FAST_UI_CSS = """
   background:var(--card)!important;border:1px solid var(--border)!important;
   border-radius:16px!important;color:var(--text)!important;
 }
-.guest-banner{
-  background:linear-gradient(135deg,rgba(245,158,11,.15),rgba(239,68,68,.15));
-  border:1px solid var(--warn);border-radius:12px;
+.community-banner{
+  background:linear-gradient(135deg,rgba(34,211,238,.12),rgba(124,92,255,.12));
+  border:1px solid var(--accent2);border-radius:12px;
   padding:8px 14px;margin-bottom:12px;font-size:.9rem;
 }
 .poll-indicator{
@@ -328,6 +338,7 @@ try:
     GITHUB_TOKEN = st.secrets["DB_GITHUB_TOKEN"]
     REPO_NAME = st.secrets["DB_REPO_NAME"]
     BRANCH = st.secrets.get("DB_BRANCH", "main")
+    SECRET_KEY = st.secrets.get("DB_SECRET_KEY", "lttp-default-secret-change-me")
 except Exception:
     st.error(L["missing_secrets"])
     st.stop()
@@ -412,7 +423,72 @@ def hash_password(p):
     return hashlib.sha256(p.encode()).hexdigest()
 
 # ═══════════════════════════════════════════════════════════════
-#  SMART POLLING ENGINE
+#  REMEMBER ME — HMAC token
+# ═══════════════════════════════════════════════════════════════
+def make_remember_token(username: str) -> str:
+    """Tạo token: base64(username|expiry|signature)."""
+    expiry = int(time.time()) + REMEMBER_DAYS * 86400
+    payload = f"{username}|{expiry}"
+    sig = hmac.new(SECRET_KEY.encode(), payload.encode(), hashlib.sha256).hexdigest()[:32]
+    raw = f"{payload}|{sig}"
+    return base64.urlsafe_b64encode(raw.encode()).decode()
+
+def verify_remember_token(token: str):
+    """Trả username nếu hợp lệ, else None."""
+    try:
+        raw = base64.urlsafe_b64decode(token.encode()).decode()
+        username, expiry_s, sig = raw.rsplit("|", 2)
+        expiry = int(expiry_s)
+        if time.time() > expiry:
+            return None
+        expect = hmac.new(
+            SECRET_KEY.encode(),
+            f"{username}|{expiry}".encode(),
+            hashlib.sha256
+        ).hexdigest()[:32]
+        if hmac.compare_digest(sig, expect):
+            return username
+        return None
+    except Exception:
+        return None
+
+def set_remember_cookie(token: str):
+    """Lưu token vào query params (Streamlit không set HTTP cookie trực tiếp được)."""
+    st.query_params[REMEMBER_COOKIE_KEY] = token
+
+def clear_remember_cookie():
+    if REMEMBER_COOKIE_KEY in st.query_params:
+        del st.query_params[REMEMBER_COOKIE_KEY]
+
+def try_auto_login():
+    """Đọc token từ query params, tự đăng nhập nếu hợp lệ."""
+    if st.session_state.logged_in:
+        return False
+    token = st.query_params.get(REMEMBER_COOKIE_KEY, "")
+    if not token:
+        return False
+    username = verify_remember_token(token)
+    if not username:
+        clear_remember_cookie()
+        return False
+    # Load accounts, verify user tồn tại
+    accounts, _ = load_content(USER_FILE)
+    user = next((x for x in accounts if x["username"] == username), None)
+    if not user:
+        clear_remember_cookie()
+        return False
+    # Đăng nhập
+    st.session_state.logged_in = True
+    st.session_state.is_guest = False
+    st.session_state.username = username
+    st.session_state.remember_token = token
+    st.session_state.last_seen_saved = 0
+    st.session_state.force_refresh = True
+    st.session_state.last_activity = time.time()
+    return True
+
+# ═══════════════════════════════════════════════════════════════
+#  SMART POLLING
 # ═══════════════════════════════════════════════════════════════
 def compute_next_poll_interval():
     idle = time.time() - st.session_state.last_msg_ts
@@ -444,14 +520,12 @@ def smart_check_new_messages(room_key, force=False):
     return True, data
 
 def filter_messages(data, room_key, friends, username, search_q=""):
-    if room_key == GUEST_ROOM:
-        msgs = [m for m in data if m.get("room") == "guest"]
-    elif room_key == "__public__":
-        msgs = [
-            m for m in data
-            if m.get("room", "public") == "public"
-            and (m["user"] == username or m["user"] in friends)
-        ]
+    """
+    Community room: TẤT CẢ tin nhắn public/community — không phân biệt guest/user.
+    Private room: chỉ tin giữa 2 người.
+    """
+    if room_key == COMMUNITY_ROOM:
+        msgs = [m for m in data if m.get("room") in ("public", "community", "guest")]
     else:
         msgs = [
             m for m in data
@@ -495,16 +569,27 @@ def is_online(user):
     except Exception:
         return False
 
-def logout():
+def logout(keep_remember=False):
+    if not keep_remember:
+        clear_remember_cookie()
     st.session_state.logged_in = False
     st.session_state.is_guest = False
     st.session_state.username = ""
+    st.session_state.guest_display = ""
     st.session_state.reply_to = None
     st.session_state.search_query = ""
     st.session_state.chat_buffer = ""
     st.session_state.prev_room = None
     st.session_state.chat_sha_cache.clear()
     st.session_state.chat_data_cache.clear()
+    st.session_state.remember_token = ""
+
+# ═══════════════════════════════════════════════════════════════
+#  AUTO LOGIN ATTEMPT (trước khi render auth screen)
+# ═══════════════════════════════════════════════════════════════
+if not st.session_state.logged_in:
+    if try_auto_login():
+        st.rerun()
 
 # ═══════════════════════════════════════════════════════════════
 #  SIDEBAR TOP
@@ -554,12 +639,16 @@ if not st.session_state.logged_in:
         with tab_login:
             u = st.text_input(L["username"], key="li_u")
             p = st.text_input(L["password"], type="password", key="li_p")
+            remember = st.checkbox(L["remember_me"], value=True, key="li_remember")
             if st.button(L["btn_login"], use_container_width=True, type="primary", key="li_btn"):
                 if not u or not p:
                     st.warning(L["err_missing"])
                 else:
                     h = hash_password(p)
-                    found = next((x for x in accounts_raw if x["username"] == u and x["password"] == h), None)
+                    found = next(
+                        (x for x in accounts_raw if x["username"] == u and x["password"] == h),
+                        None
+                    )
                     if found:
                         st.session_state.logged_in = True
                         st.session_state.is_guest = False
@@ -567,6 +656,12 @@ if not st.session_state.logged_in:
                         st.session_state.last_seen_saved = 0
                         st.session_state.force_refresh = True
                         activity_tick()
+                        if remember:
+                            token = make_remember_token(u)
+                            set_remember_cookie(token)
+                            st.session_state.remember_token = token
+                        else:
+                            clear_remember_cookie()
                         st.rerun()
                     else:
                         st.error(L["err_wrong"])
@@ -658,13 +753,13 @@ else:
     online_friends = []
 
 # ═══════════════════════════════════════════════════════════════
-#  SIDEBAR (logged in)
+#  SIDEBAR
 # ═══════════════════════════════════════════════════════════════
 with st.sidebar:
     avatar_cls = "avatar avatar-guest" if is_guest else "avatar"
     badge_html = f"<span class='badge badge-guest'>{L['guest_badge']}</span>" if is_guest else ""
     sub_line = (
-        f"<span style='color:var(--muted);'>{L['guest_note'][:40]}…</span>"
+        f"<span style='color:var(--muted);'>💬 {L['community_sub'][:40]}…</span>"
         if is_guest
         else f"<span class='dot-online'></span>{len(online_friends)} {L['online_users']}"
     )
@@ -684,11 +779,11 @@ with st.sidebar:
 
     st.markdown(f"#### {L['sidebar_rooms']}")
     if is_guest:
-        room_labels = [L["guest_room"]]
-        room_keys = [GUEST_ROOM]
+        room_labels = [L["community_room"]]
+        room_keys = [COMMUNITY_ROOM]
     else:
-        room_labels = [L["public_room"]] + [f"💬 {f}" for f in my_friends]
-        room_keys = ["__public__"] + my_friends
+        room_labels = [L["community_room"]] + [f"💬 {f}" for f in my_friends]
+        room_keys = [COMMUNITY_ROOM] + my_friends
 
     current_room = st.session_state.get("room_select", 0)
     if not isinstance(current_room, int) or current_room >= len(room_keys):
@@ -763,15 +858,11 @@ with st.sidebar:
 # ═══════════════════════════════════════════════════════════════
 #  CHAT AREA
 # ═══════════════════════════════════════════════════════════════
-is_public = selected_key == "__public__"
-is_guest_room = selected_key == GUEST_ROOM
+is_community = selected_key == COMMUNITY_ROOM
 
-if is_guest_room:
-    room_title, avatar_char = L["guest_room"], "🎭"
-    sub = f"🎭 {L['guest_note'][:60]}"
-elif is_public:
-    room_title, avatar_char = L["public_room"], "🌐"
-    sub = f"{len(my_friends)} {L['friends'].lower()} · {len(online_friends)} {L['online']}"
+if is_community:
+    room_title, avatar_char = L["community_room"], "🌐"
+    sub = L["community_sub"]
 else:
     room_title, avatar_char = f"💬 {selected_key}", initials(selected_key)
     sub = f"<span class='dot-online'></span>{L['online']}" if selected_key in online_friends else "offline"
@@ -789,8 +880,11 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-if is_guest:
-    st.markdown(f"<div class='guest-banner'>🎭 {L['guest_note']}</div>", unsafe_allow_html=True)
+if is_community:
+    st.markdown(
+        f"<div class='community-banner'>🌐 {L['community_sub']}</div>",
+        unsafe_allow_html=True
+    )
 
 # SEARCH
 search_col, clear_col = st.columns([9, 1])
@@ -812,8 +906,11 @@ with clear_col:
 # ═══════════════════════════════════════════════════════════════
 def render_one_message(m):
     is_me = m["user"] == st.session_state.username
-    avatar = "🧑" if is_me else ("🎭" if m["user"].startswith(GUEST_PREFIX) else "👤")
-    disp = m.get("display_name", m["user"]) if m["user"].startswith(GUEST_PREFIX) else m["user"]
+    is_guest_msg = m["user"].startswith(GUEST_PREFIX)
+    avatar = "🧑" if is_me else ("🎭" if is_guest_msg else "👤")
+    disp = m.get("display_name", m["user"]) if is_guest_msg else m["user"]
+    # Badge guest
+    badge = " <span class='badge badge-guest' style='font-size:.6rem;'>khách</span>" if is_guest_msg else ""
     with st.chat_message(m["role"], avatar=avatar):
         if m.get("reply_to"):
             rp = m["reply_to"]
@@ -822,7 +919,7 @@ def render_one_message(m):
                 unsafe_allow_html=True
             )
         st.markdown(
-            f"**{disp}** <span style='color:var(--muted);font-size:.75rem;'>· {m['time']}</span>",
+            f"**{disp}**{badge} <span style='color:var(--muted);font-size:.75rem;'>· {m['time']}</span>",
             unsafe_allow_html=True
         )
         if m.get("text"):
@@ -843,8 +940,7 @@ def render_one_message(m):
                 st.rerun()
 
 # ═══════════════════════════════════════════════════════════════
-#  LIVE FRAGMENT — FIXED
-#  run_every CỐ ĐỊNH = 1s, throttle bên trong fragment
+#  LIVE FRAGMENT
 # ═══════════════════════════════════════════════════════════════
 @st.fragment(run_every=1)
 def live_chat_fragment(room_key: str, search_q: str, friends: tuple, username: str):
@@ -879,8 +975,7 @@ def live_chat_fragment(room_key: str, search_q: str, friends: tuple, username: s
         unsafe_allow_html=True
     )
 
-# Safe args
-_safe_room = selected_key if isinstance(selected_key, str) else GUEST_ROOM
+_safe_room = selected_key if isinstance(selected_key, str) else COMMUNITY_ROOM
 _safe_search = st.session_state.search_query or ""
 _safe_friends = tuple(my_friends) if my_friends else ()
 
@@ -934,10 +1029,9 @@ with attach_col:
                             "display_name": display_name,
                             "role": "user", "time": now_str(),
                             "text": "", "file_url": url, "file_name": up.name,
-                            "room": "guest" if is_guest_room
-                                    else ("public" if is_public else "private"),
+                            "room": "community" if is_community else "private",
                         }
-                        if not is_public and not is_guest_room:
+                        if not is_community:
                             msg["to"] = selected_key
                         chat_all.append(msg)
                         if len(chat_all) > MAX_CHAT_ENTRIES:
@@ -966,10 +1060,9 @@ if prompt is not None and prompt != "":
             "display_name": display_name,
             "role": "user", "time": now_str(),
             "text": final_text,
-            "room": "guest" if is_guest_room
-                    else ("public" if is_public else "private"),
+            "room": "community" if is_community else "private",
         }
-        if not is_public and not is_guest_room:
+        if not is_community:
             msg["to"] = selected_key
         if st.session_state.reply_to:
             msg["reply_to"] = st.session_state.reply_to
@@ -990,7 +1083,9 @@ if prompt is not None and prompt != "":
 with st.expander("⚙️ " + L["info"], expanded=False):
     st.caption(f"{APP_NAME} · v{APP_VERSION}")
     st.caption(f"⚡ Poll interval: **{st.session_state.poll_interval}s** (adaptive)")
-    if is_public and not is_guest:
+    if st.session_state.remember_token:
+        st.caption("🔐 " + L["remember_me"])
+    if is_community and not is_guest:
         if st.button("🗑️ " + L["clear_chat"], key="clear_btn"):
             chat_all, chat_sha = load_content(CHAT_FILE)
             ok, _ = save_github_file(CHAT_FILE, [], chat_sha, "clear")
