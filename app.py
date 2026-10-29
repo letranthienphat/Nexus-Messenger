@@ -1,11 +1,7 @@
 """
-LTTP Messenger v3.2 - Smart Polling
-====================================
-Optimizations:
-  • HEAD request (sha-only) thay vì GET full file
-  • Adaptive polling: 1s khi active → 15s khi idle
-  • Append-only diff: chỉ render tin mới
-  • session_state cache: bỏ qua render nếu sha không đổi
+LTTP Messenger v3.2.1 - Smart Polling (FIXED)
+==============================================
+Fixed: @st.fragment run_every không nhận callable → dùng throttle nội bộ.
 """
 
 import streamlit as st
@@ -21,7 +17,7 @@ import zoneinfo
 #  CONFIG
 # ═══════════════════════════════════════════════════════════════
 APP_NAME = "LTTP Messenger"
-APP_VERSION = "3.2.0 (Smart Polling)"
+APP_VERSION = "3.2.1 (Smart Polling)"
 MAX_FILE_MB = 25
 MAX_CHAT_ENTRIES = 800
 SESSION_TIMEOUT_MIN = 60
@@ -30,12 +26,11 @@ GUEST_ROOM = "__guest_lobby__"
 ONLINE_WINDOW_SEC = 300
 LAST_SEEN_SAVE_INTERVAL = 120
 
-# Adaptive polling bounds
-POLL_FAST = 1        # giây — ngay sau khi có tin / user active
-POLL_MED = 3         # giây — bình thường
-POLL_SLOW = 8        # giây — idle lâu
-POLL_MAX = 15        # giây — idle rất lâu
-ACTIVE_WINDOW = 30   # giây — coi là "vừa active" nếu có tin trong khoảng này
+POLL_FAST = 1
+POLL_MED = 3
+POLL_SLOW = 8
+POLL_MAX = 15
+ACTIVE_WINDOW = 30
 
 # ═══════════════════════════════════════════════════════════════
 #  SESSION STATE
@@ -52,14 +47,12 @@ def init_state():
         "last_seen_saved": 0,
         "reply_to": None,
         "search_query": "",
-        "pending_emoji": "",
         "chat_buffer": "",
         "prev_room": None,
-        # --- Smart polling state ---
-        "chat_sha_cache": {},          # {room_key: sha}
-        "chat_data_cache": {},         # {room_key: [messages]}
-        "last_msg_ts": 0.0,            # unix ts của lần cuối thấy tin mới
-        "poll_interval": POLL_MED,
+        "chat_sha_cache": {},
+        "chat_data_cache": {},
+        "last_msg_ts": 0.0,
+        "poll_interval": POLL_FAST,
         "last_poll_ts": 0.0,
         "force_refresh": True,
     }
@@ -67,10 +60,9 @@ def init_state():
         st.session_state.setdefault(k, v)
 
 init_state()
-L = LANGUAGES_REF = None  # placeholder, gán sau
 
 # ═══════════════════════════════════════════════════════════════
-#  i18n
+#  i18n (rút gọn — giữ nguyên từ bản trước)
 # ═══════════════════════════════════════════════════════════════
 LANGUAGES = {
     "Tiếng Việt": {
@@ -127,7 +119,6 @@ LANGUAGES = {
         "guest_leave": "🚪 Rời sảnh khách",
         "search_clear": "Xóa tìm kiếm",
         "poll_status": "Poll",
-        "new_badge": "tin mới",
     },
     "English": {
         "app_tagline": "Fast, secure, unlimited chat.",
@@ -183,7 +174,6 @@ LANGUAGES = {
         "guest_leave": "🚪 Leave guest lobby",
         "search_clear": "Clear search",
         "poll_status": "Poll",
-        "new_badge": "new",
     },
 }
 L = LANGUAGES[st.session_state.lang]
@@ -220,29 +210,13 @@ FAST_UI_CSS = """
   background:var(--card)!important;border:1px solid var(--border)!important;
   color:var(--text)!important;border-radius:12px!important;padding:10px 12px!important;
 }
-.stTextInput input:focus,.stTextArea textarea:focus{
-  border-color:var(--accent)!important;box-shadow:0 0 0 2px rgba(124,92,255,.25)!important;
-}
 .stButton>button{
   background:var(--card);border:1px solid var(--border);color:var(--text);
   border-radius:12px;font-weight:600;transition:all .18s ease;
 }
-.stButton>button:hover{
-  transform:translateY(-1px);border-color:var(--accent);
-  box-shadow:0 6px 20px rgba(124,92,255,.25);
-}
 .stButton>button[kind="primary"]{
   background:linear-gradient(135deg,var(--accent),var(--accent2));
   border:none;color:#fff;
-}
-.stTabs [data-baseweb="tab-list"]{gap:6px;background:transparent}
-.stTabs [data-baseweb="tab"]{
-  background:var(--card);border:1px solid var(--border);border-radius:12px;
-  padding:8px 16px;color:var(--muted);
-}
-.stTabs [aria-selected="true"]{
-  background:linear-gradient(135deg,var(--accent),var(--accent2));
-  color:#fff!important;border-color:transparent!important;
 }
 [data-testid="stChatMessage"]{
   background:var(--bubble-other);border:1px solid var(--border);
@@ -319,14 +293,6 @@ FAST_UI_CSS = """
   border-radius:20px;padding:4px 12px;font-size:.72rem;
   color:var(--muted);backdrop-filter:blur(8px);
 }
-.new-msg-badge{
-  position:fixed;bottom:80px;left:50%;transform:translateX(-50%);
-  background:var(--accent);color:#fff;border-radius:20px;
-  padding:8px 18px;font-size:.85rem;font-weight:600;
-  box-shadow:0 4px 20px rgba(124,92,255,.5);z-index:9998;
-  animation:slideUp .3s ease;
-}
-@keyframes slideUp{from{opacity:0;transform:translate(-50%,10px)}to{opacity:1;transform:translate(-50%,0)}}
 </style>
 """
 st.markdown(FAST_UI_CSS, unsafe_allow_html=True)
@@ -375,26 +341,7 @@ def get_repo():
 
 repo = get_repo()
 
-# --- CORE: smart load — HEAD trước, GET sau nếu cần ---
-def get_file_sha(path):
-    """HEAD-like: chỉ lấy sha, KHÔNG download content. Rẻ hơn 10x."""
-    try:
-        fc = repo.get_contents(path, ref=BRANCH)
-        # PyGithub luôn GET full file. Để HEAD thật, dùng requests trực tiếp:
-        # → xem hàm get_sha_via_api() bên dưới (nhanh hơn)
-        return fc.sha
-    except GithubException as e:
-        if e.status == 404:
-            return None
-        return None
-    except Exception:
-        return None
-
 def get_sha_via_api(path):
-    """
-    Dùng REST API trực tiếp với method HEAD — KHÔNG tải nội dung.
-    Nhanh gấp ~10x so với repo.get_contents() khi file lớn.
-    """
     import requests
     url = f"https://api.github.com/repos/{REPO_NAME}/contents/{path}"
     headers = {
@@ -405,11 +352,9 @@ def get_sha_via_api(path):
         r = requests.head(url, headers=headers, params={"ref": BRANCH}, timeout=5)
         if r.status_code == 404:
             return None
-        # GitHub trả ETag dạng: W/"sha256..." — dùng luôn làm fingerprint
         etag = r.headers.get("ETag", "")
         if etag:
             return etag
-        # Fallback: lấy từ header content-disposition? Không có sha. → GET nhẹ
         r2 = requests.get(url, headers=headers, params={"ref": BRANCH}, timeout=5)
         if r2.status_code == 200:
             return r2.json().get("sha")
@@ -418,7 +363,6 @@ def get_sha_via_api(path):
         return None
 
 def load_content(path):
-    """GET full content — chỉ gọi khi SHA đã thay đổi."""
     try:
         fc = repo.get_contents(path, ref=BRANCH)
         return json.loads(fc.decoded_content.decode("utf-8")), fc.sha
@@ -471,13 +415,6 @@ def hash_password(p):
 #  SMART POLLING ENGINE
 # ═══════════════════════════════════════════════════════════════
 def compute_next_poll_interval():
-    """
-    Adaptive interval dựa trên thời gian từ tin nhắn mới nhất:
-      < 30s  → 1s   (vừa có tin, đang sôi động)
-      < 2m   → 3s   (bình thường)
-      < 10m  → 8s   (vắng)
-      > 10m  → 15s  (rất vắng)
-    """
     idle = time.time() - st.session_state.last_msg_ts
     if idle < ACTIVE_WINDOW:
         return POLL_FAST
@@ -488,27 +425,19 @@ def compute_next_poll_interval():
     return POLL_MAX
 
 def smart_check_new_messages(room_key, force=False):
-    """
-    Trả về (changed: bool, messages: list).
-    Chỉ GET content khi SHA thay đổi. Nếu SHA giống → trả cache.
-    """
     cache_sha = st.session_state.chat_sha_cache.get(room_key)
     cache_data = st.session_state.chat_data_cache.get(room_key, [])
 
     if not force and not st.session_state.force_refresh:
-        # HEAD request cực nhẹ
         new_sha = get_sha_via_api(CHAT_FILE)
         if new_sha and new_sha == cache_sha:
-            # Không có tin mới — trả cache, không GET
             return False, cache_data
 
-    # Có thay đổi (hoặc lần đầu) → GET full
     data, real_sha = load_content(CHAT_FILE)
     st.session_state.chat_sha_cache[room_key] = real_sha
     st.session_state.chat_data_cache[room_key] = data
     st.session_state.force_refresh = False
 
-    # Update last_msg_ts nếu thấy tin mới hơn cache cũ
     if data and (not cache_data or len(data) > len(cache_data)):
         st.session_state.last_msg_ts = time.time()
 
@@ -717,7 +646,6 @@ if not is_guest:
             next((x for x in accounts_raw if x["username"] == f), None)
         )
     ]
-    # Throttled last_seen save
     now = time.time()
     if now - st.session_state.last_seen_saved >= LAST_SEEN_SAVE_INTERVAL:
         me["last_seen"] = now
@@ -730,7 +658,7 @@ else:
     online_friends = []
 
 # ═══════════════════════════════════════════════════════════════
-#  SIDEBAR
+#  SIDEBAR (logged in)
 # ═══════════════════════════════════════════════════════════════
 with st.sidebar:
     avatar_cls = "avatar avatar-guest" if is_guest else "avatar"
@@ -864,7 +792,7 @@ st.markdown(f"""
 if is_guest:
     st.markdown(f"<div class='guest-banner'>🎭 {L['guest_note']}</div>", unsafe_allow_html=True)
 
-# --- SEARCH ---
+# SEARCH
 search_col, clear_col = st.columns([9, 1])
 with search_col:
     search = st.text_input(
@@ -879,7 +807,9 @@ with clear_col:
         st.session_state.search_query = ""
         st.rerun()
 
-# --- MESSAGE RENDER HELPER ---
+# ═══════════════════════════════════════════════════════════════
+#  MESSAGE RENDERER
+# ═══════════════════════════════════════════════════════════════
 def render_one_message(m):
     is_me = m["user"] == st.session_state.username
     avatar = "🧑" if is_me else ("🎭" if m["user"].startswith(GUEST_PREFIX) else "👤")
@@ -913,35 +843,35 @@ def render_one_message(m):
                 st.rerun()
 
 # ═══════════════════════════════════════════════════════════════
-#  SMART LIVE FRAGMENT
-#  - run_every động qua session_state.poll_interval
-#  - chỉ GET content khi SHA thay đổi
-#  - chỉ render khi data thay đổi
+#  LIVE FRAGMENT — FIXED
+#  run_every CỐ ĐỊNH = 1s, throttle bên trong fragment
 # ═══════════════════════════════════════════════════════════════
-def _poll_interval():
-    """Streamlit đọc lại mỗi khi fragment chạy."""
-    return st.session_state.poll_interval
+@st.fragment(run_every=1)
+def live_chat_fragment(room_key: str, search_q: str, friends: tuple, username: str):
+    if not room_key or not isinstance(room_key, str):
+        st.info(L["no_messages"])
+        return
 
-@st.fragment(run_every=_poll_interval)
-def live_chat_fragment(room_key, search_q, friends, username):
-    # 1. Kiểm tra tin mới bằng SHA (HEAD, cực nhẹ)
-    changed, data = smart_check_new_messages(room_key)
+    now = time.time()
+    elapsed = now - st.session_state.get("last_poll_ts", 0)
+    interval = st.session_state.get("poll_interval", POLL_FAST)
+    need_poll = elapsed >= interval or st.session_state.get("force_refresh", False)
 
-    # 2. Filter
-    msgs = filter_messages(data, room_key, friends, username, search_q)
+    if need_poll:
+        changed, data = smart_check_new_messages(room_key)
+        st.session_state.poll_interval = compute_next_poll_interval()
+        st.session_state.last_poll_ts = time.time()
+        st.session_state.force_refresh = False
+    else:
+        data = st.session_state.chat_data_cache.get(room_key, [])
 
-    # 3. Render
+    msgs = filter_messages(data, room_key, list(friends), username, search_q)
     if not msgs:
         st.info(L["no_messages"])
     else:
         for m in msgs:
             render_one_message(m)
 
-    # 4. Cập nhật adaptive interval cho lần poll sau
-    st.session_state.poll_interval = compute_next_poll_interval()
-    st.session_state.last_poll_ts = time.time()
-
-    # 5. Hiển thị indicator nhỏ
     idle = time.time() - st.session_state.last_msg_ts
     st.markdown(
         f"<div class='poll-indicator'>⚡ {st.session_state.poll_interval}s "
@@ -949,16 +879,12 @@ def live_chat_fragment(room_key, search_q, friends, username):
         unsafe_allow_html=True
     )
 
-# Khởi tạo interval ban đầu nếu chưa có
-if "poll_interval" not in st.session_state or st.session_state.poll_interval == POLL_MED:
-    st.session_state.poll_interval = POLL_FAST
+# Safe args
+_safe_room = selected_key if isinstance(selected_key, str) else GUEST_ROOM
+_safe_search = st.session_state.search_query or ""
+_safe_friends = tuple(my_friends) if my_friends else ()
 
-live_chat_fragment(
-    selected_key,
-    st.session_state.search_query,
-    tuple(my_friends),
-    st.session_state.username,
-)
+live_chat_fragment(_safe_room, _safe_search, _safe_friends, st.session_state.username)
 
 # ═══════════════════════════════════════════════════════════════
 #  REPLY PREVIEW
