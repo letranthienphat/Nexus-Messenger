@@ -26,5 +26,13 @@
     "time": "20:06 29/10/2026",
     "text": "test ok",
     "room": "community"
+  },
+  {
+    "user": "guest_test_79224",
+    "display_name": "test",
+    "role": "user",
+    "time": "20:07 29/10/2026",
+    "text": "okok",
+    "room": "community"
   }
 ]
