@@ -18,5 +18,13 @@
       "user": "Test",
       "text": "Xin chào?"
     }
+  },
+  {
+    "user": "Phat",
+    "display_name": "Phat",
+    "role": "user",
+    "time": "20:06 29/10/2026",
+    "text": "test ok",
+    "room": "community"
   }
 ]
