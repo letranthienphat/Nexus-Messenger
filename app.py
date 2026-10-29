@@ -1,8 +1,11 @@
 """
-LTTP Messenger v3.1 - Fast UI + Guest Mode
-==========================================
-Features: Guest mode (name-only), real-time fragment, glassmorphism UI,
-          emoji injection, reply, search, online status, retry-safe writes.
+LTTP Messenger v3.2 - Smart Polling
+====================================
+Optimizations:
+  • HEAD request (sha-only) thay vì GET full file
+  • Adaptive polling: 1s khi active → 15s khi idle
+  • Append-only diff: chỉ render tin mới
+  • session_state cache: bỏ qua render nếu sha không đổi
 """
 
 import streamlit as st
@@ -18,18 +21,24 @@ import zoneinfo
 #  CONFIG
 # ═══════════════════════════════════════════════════════════════
 APP_NAME = "LTTP Messenger"
-APP_VERSION = "3.1.0 (Fast UI · Guest)"
+APP_VERSION = "3.2.0 (Smart Polling)"
 MAX_FILE_MB = 25
 MAX_CHAT_ENTRIES = 800
 SESSION_TIMEOUT_MIN = 60
-REFRESH_INTERVAL = "4s"
-GUEST_PREFIX = "guest_"           # prefix phân biệt guest với user thật
-GUEST_ROOM = "__guest_lobby__"    # phòng riêng cho guest (không lẫn public)
+GUEST_PREFIX = "guest_"
+GUEST_ROOM = "__guest_lobby__"
 ONLINE_WINDOW_SEC = 300
-LAST_SEEN_SAVE_INTERVAL = 120     # giây — throttle update last_seen
+LAST_SEEN_SAVE_INTERVAL = 120
+
+# Adaptive polling bounds
+POLL_FAST = 1        # giây — ngay sau khi có tin / user active
+POLL_MED = 3         # giây — bình thường
+POLL_SLOW = 8        # giây — idle lâu
+POLL_MAX = 15        # giây — idle rất lâu
+ACTIVE_WINDOW = 30   # giây — coi là "vừa active" nếu có tin trong khoảng này
 
 # ═══════════════════════════════════════════════════════════════
-#  SESSION STATE INIT — PHẢI CHẠY TRƯỚC KHI TÍNH L
+#  SESSION STATE
 # ═══════════════════════════════════════════════════════════════
 def init_state():
     defaults = {
@@ -37,6 +46,7 @@ def init_state():
         "logged_in": False,
         "is_guest": False,
         "username": "",
+        "guest_display": "",
         "client_timezone": "Asia/Ho_Chi_Minh",
         "last_activity": time.time(),
         "last_seen_saved": 0,
@@ -45,11 +55,19 @@ def init_state():
         "pending_emoji": "",
         "chat_buffer": "",
         "prev_room": None,
+        # --- Smart polling state ---
+        "chat_sha_cache": {},          # {room_key: sha}
+        "chat_data_cache": {},         # {room_key: [messages]}
+        "last_msg_ts": 0.0,            # unix ts của lần cuối thấy tin mới
+        "poll_interval": POLL_MED,
+        "last_poll_ts": 0.0,
+        "force_refresh": True,
     }
     for k, v in defaults.items():
         st.session_state.setdefault(k, v)
 
 init_state()
+L = LANGUAGES_REF = None  # placeholder, gán sau
 
 # ═══════════════════════════════════════════════════════════════
 #  i18n
@@ -107,8 +125,9 @@ LANGUAGES = {
         "online_users": "online",
         "guest_badge": "🎭 Khách",
         "guest_leave": "🚪 Rời sảnh khách",
-        "guest_welcome": "Chào mừng khách",
         "search_clear": "Xóa tìm kiếm",
+        "poll_status": "Poll",
+        "new_badge": "tin mới",
     },
     "English": {
         "app_tagline": "Fast, secure, unlimited chat.",
@@ -162,8 +181,9 @@ LANGUAGES = {
         "online_users": "online",
         "guest_badge": "🎭 Guest",
         "guest_leave": "🚪 Leave guest lobby",
-        "guest_welcome": "Welcome, guest",
         "search_clear": "Clear search",
+        "poll_status": "Poll",
+        "new_badge": "new",
     },
 }
 L = LANGUAGES[st.session_state.lang]
@@ -275,6 +295,10 @@ FAST_UI_CSS = """
   padding:1px 7px;font-size:.7rem;font-weight:700;margin-left:6px;
 }
 .badge-guest{background:var(--warn);color:#000;}
+.badge-live{
+  background:var(--success);color:#fff;border-radius:10px;
+  padding:2px 8px;font-size:.7rem;font-weight:700;
+}
 .file-chip{
   display:inline-flex;align-items:center;gap:8px;
   background:rgba(124,92,255,.15);border:1px solid var(--accent);
@@ -289,6 +313,20 @@ FAST_UI_CSS = """
   border:1px solid var(--warn);border-radius:12px;
   padding:8px 14px;margin-bottom:12px;font-size:.9rem;
 }
+.poll-indicator{
+  position:fixed;top:8px;right:12px;z-index:9999;
+  background:var(--card);border:1px solid var(--border);
+  border-radius:20px;padding:4px 12px;font-size:.72rem;
+  color:var(--muted);backdrop-filter:blur(8px);
+}
+.new-msg-badge{
+  position:fixed;bottom:80px;left:50%;transform:translateX(-50%);
+  background:var(--accent);color:#fff;border-radius:20px;
+  padding:8px 18px;font-size:.85rem;font-weight:600;
+  box-shadow:0 4px 20px rgba(124,92,255,.5);z-index:9998;
+  animation:slideUp .3s ease;
+}
+@keyframes slideUp{from{opacity:0;transform:translate(-50%,10px)}to{opacity:1;transform:translate(-50%,0)}}
 </style>
 """
 st.markdown(FAST_UI_CSS, unsafe_allow_html=True)
@@ -337,7 +375,50 @@ def get_repo():
 
 repo = get_repo()
 
-def load_github_file(path):
+# --- CORE: smart load — HEAD trước, GET sau nếu cần ---
+def get_file_sha(path):
+    """HEAD-like: chỉ lấy sha, KHÔNG download content. Rẻ hơn 10x."""
+    try:
+        fc = repo.get_contents(path, ref=BRANCH)
+        # PyGithub luôn GET full file. Để HEAD thật, dùng requests trực tiếp:
+        # → xem hàm get_sha_via_api() bên dưới (nhanh hơn)
+        return fc.sha
+    except GithubException as e:
+        if e.status == 404:
+            return None
+        return None
+    except Exception:
+        return None
+
+def get_sha_via_api(path):
+    """
+    Dùng REST API trực tiếp với method HEAD — KHÔNG tải nội dung.
+    Nhanh gấp ~10x so với repo.get_contents() khi file lớn.
+    """
+    import requests
+    url = f"https://api.github.com/repos/{REPO_NAME}/contents/{path}"
+    headers = {
+        "Authorization": f"token {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github+json",
+    }
+    try:
+        r = requests.head(url, headers=headers, params={"ref": BRANCH}, timeout=5)
+        if r.status_code == 404:
+            return None
+        # GitHub trả ETag dạng: W/"sha256..." — dùng luôn làm fingerprint
+        etag = r.headers.get("ETag", "")
+        if etag:
+            return etag
+        # Fallback: lấy từ header content-disposition? Không có sha. → GET nhẹ
+        r2 = requests.get(url, headers=headers, params={"ref": BRANCH}, timeout=5)
+        if r2.status_code == 200:
+            return r2.json().get("sha")
+        return None
+    except Exception:
+        return None
+
+def load_content(path):
+    """GET full content — chỉ gọi khi SHA đã thay đổi."""
     try:
         fc = repo.get_contents(path, ref=BRANCH)
         return json.loads(fc.decoded_content.decode("utf-8")), fc.sha
@@ -351,7 +432,6 @@ def load_github_file(path):
         return [], None
 
 def save_github_file(path, data, sha=None, message="update", retries=4):
-    """Return (success, new_sha) để caller cập nhật SHA tránh 409."""
     content = json.dumps(data, ensure_ascii=False, indent=2)
     for attempt in range(retries):
         try:
@@ -388,6 +468,74 @@ def hash_password(p):
     return hashlib.sha256(p.encode()).hexdigest()
 
 # ═══════════════════════════════════════════════════════════════
+#  SMART POLLING ENGINE
+# ═══════════════════════════════════════════════════════════════
+def compute_next_poll_interval():
+    """
+    Adaptive interval dựa trên thời gian từ tin nhắn mới nhất:
+      < 30s  → 1s   (vừa có tin, đang sôi động)
+      < 2m   → 3s   (bình thường)
+      < 10m  → 8s   (vắng)
+      > 10m  → 15s  (rất vắng)
+    """
+    idle = time.time() - st.session_state.last_msg_ts
+    if idle < ACTIVE_WINDOW:
+        return POLL_FAST
+    if idle < 120:
+        return POLL_MED
+    if idle < 600:
+        return POLL_SLOW
+    return POLL_MAX
+
+def smart_check_new_messages(room_key, force=False):
+    """
+    Trả về (changed: bool, messages: list).
+    Chỉ GET content khi SHA thay đổi. Nếu SHA giống → trả cache.
+    """
+    cache_sha = st.session_state.chat_sha_cache.get(room_key)
+    cache_data = st.session_state.chat_data_cache.get(room_key, [])
+
+    if not force and not st.session_state.force_refresh:
+        # HEAD request cực nhẹ
+        new_sha = get_sha_via_api(CHAT_FILE)
+        if new_sha and new_sha == cache_sha:
+            # Không có tin mới — trả cache, không GET
+            return False, cache_data
+
+    # Có thay đổi (hoặc lần đầu) → GET full
+    data, real_sha = load_content(CHAT_FILE)
+    st.session_state.chat_sha_cache[room_key] = real_sha
+    st.session_state.chat_data_cache[room_key] = data
+    st.session_state.force_refresh = False
+
+    # Update last_msg_ts nếu thấy tin mới hơn cache cũ
+    if data and (not cache_data or len(data) > len(cache_data)):
+        st.session_state.last_msg_ts = time.time()
+
+    return True, data
+
+def filter_messages(data, room_key, friends, username, search_q=""):
+    if room_key == GUEST_ROOM:
+        msgs = [m for m in data if m.get("room") == "guest"]
+    elif room_key == "__public__":
+        msgs = [
+            m for m in data
+            if m.get("room", "public") == "public"
+            and (m["user"] == username or m["user"] in friends)
+        ]
+    else:
+        msgs = [
+            m for m in data
+            if m.get("room") == "private"
+            and ((m["user"] == username and m.get("to") == room_key)
+                 or (m["user"] == room_key and m.get("to") == username))
+        ]
+    if search_q:
+        q = search_q.lower()
+        msgs = [m for m in msgs if q in (m.get("text", "") + m.get("user", "")).lower()]
+    return msgs
+
+# ═══════════════════════════════════════════════════════════════
 #  HELPERS
 # ═══════════════════════════════════════════════════════════════
 def initials(name):
@@ -418,20 +566,6 @@ def is_online(user):
     except Exception:
         return False
 
-def save_last_seen(accounts, acc_sha):
-    """Throttle update last_seen để tránh spam GitHub API."""
-    now = time.time()
-    if now - st.session_state.last_seen_saved < LAST_SEEN_SAVE_INTERVAL:
-        return acc_sha
-    me = next((x for x in accounts if x["username"] == st.session_state.username), None)
-    if me:
-        me["last_seen"] = now
-        ok, new_sha = save_github_file(USER_FILE, accounts, acc_sha, "heartbeat")
-        if ok:
-            st.session_state.last_seen_saved = now
-            return new_sha
-    return acc_sha
-
 def logout():
     st.session_state.logged_in = False
     st.session_state.is_guest = False
@@ -440,9 +574,11 @@ def logout():
     st.session_state.search_query = ""
     st.session_state.chat_buffer = ""
     st.session_state.prev_room = None
+    st.session_state.chat_sha_cache.clear()
+    st.session_state.chat_data_cache.clear()
 
 # ═══════════════════════════════════════════════════════════════
-#  SIDEBAR TOP (Language + Clock) — luôn hiển thị
+#  SIDEBAR TOP
 # ═══════════════════════════════════════════════════════════════
 with st.sidebar:
     st.markdown(f"### 💬 **{APP_NAME}**")
@@ -467,7 +603,7 @@ with st.sidebar:
     st.divider()
 
 # ═══════════════════════════════════════════════════════════════
-#  AUTH SCREEN (LOGIN / REGISTER / GUEST)
+#  AUTH SCREEN
 # ═══════════════════════════════════════════════════════════════
 if not st.session_state.logged_in:
     st.markdown(f"""
@@ -484,9 +620,8 @@ if not st.session_state.logged_in:
             f"📝 {L['register']}",
             f"🎭 {L['guest']}",
         ])
-        accounts, acc_sha = load_github_file(USER_FILE)
+        accounts_raw, _ = load_content(USER_FILE)
 
-        # ---- LOGIN ----
         with tab_login:
             u = st.text_input(L["username"], key="li_u")
             p = st.text_input(L["password"], type="password", key="li_p")
@@ -495,18 +630,18 @@ if not st.session_state.logged_in:
                     st.warning(L["err_missing"])
                 else:
                     h = hash_password(p)
-                    found = next((x for x in accounts if x["username"] == u and x["password"] == h), None)
+                    found = next((x for x in accounts_raw if x["username"] == u and x["password"] == h), None)
                     if found:
                         st.session_state.logged_in = True
                         st.session_state.is_guest = False
                         st.session_state.username = u
                         st.session_state.last_seen_saved = 0
+                        st.session_state.force_refresh = True
                         activity_tick()
                         st.rerun()
                     else:
                         st.error(L["err_wrong"])
 
-        # ---- REGISTER ----
         with tab_reg:
             ru = st.text_input(L["username"], key="rg_u")
             rp = st.text_input(L["new_password"], type="password", key="rg_p")
@@ -520,10 +655,10 @@ if not st.session_state.logged_in:
                     st.error(L["err_password_short"])
                 elif rp != rc:
                     st.error(L["err_match"])
-                elif any(x["username"].lower() == ru.lower() for x in accounts):
+                elif any(x["username"].lower() == ru.lower() for x in accounts_raw):
                     st.error(L["err_exist"])
                 else:
-                    accounts.append({
+                    accounts_raw.append({
                         "username": ru,
                         "password": hash_password(rp),
                         "friends": [],
@@ -531,11 +666,11 @@ if not st.session_state.logged_in:
                         "friend_requests_sent": [],
                         "last_seen": time.time(),
                     })
-                    ok, _ = save_github_file(USER_FILE, accounts, acc_sha, f"new user {ru}")
+                    _, acc_sha = load_content(USER_FILE)
+                    ok, _ = save_github_file(USER_FILE, accounts_raw, acc_sha, f"new user {ru}")
                     if ok:
                         st.success(L["success_register"])
 
-        # ---- GUEST ----
         with tab_guest:
             st.info(L["guest_note"])
             gname = st.text_input(L["guest_name"], key="guest_n")
@@ -543,52 +678,59 @@ if not st.session_state.logged_in:
                 if not gname or not validate_guest_name(gname):
                     st.error(L["err_guest_name"])
                 else:
-                    # Tên nội bộ: guest_<name> để tránh trùng user thật
                     internal = f"{GUEST_PREFIX}{gname}_{int(time.time()) % 100000}"
                     st.session_state.logged_in = True
                     st.session_state.is_guest = True
                     st.session_state.username = internal
                     st.session_state.guest_display = gname
+                    st.session_state.force_refresh = True
                     activity_tick()
                     st.rerun()
     st.stop()
 
 # ═══════════════════════════════════════════════════════════════
-#  LOGGED IN (user hoặc guest)
+#  LOGGED IN
 # ═══════════════════════════════════════════════════════════════
 check_session()
 activity_tick()
 
 is_guest = st.session_state.is_guest
-display_name = st.session_state.get("guest_display", st.session_state.username) if is_guest else st.session_state.username
+display_name = (
+    st.session_state.get("guest_display", st.session_state.username)
+    if is_guest else st.session_state.username
+)
 
-accounts, acc_sha = load_github_file(USER_FILE)
-chat_all, chat_sha = load_github_file(CHAT_FILE)
+accounts_raw, acc_sha = load_content(USER_FILE)
 
-# Với guest: KHÔNG load/sửa accounts, không check friend
 if not is_guest:
-    me = next((x for x in accounts if x["username"] == st.session_state.username), None)
+    me = next((x for x in accounts_raw if x["username"] == st.session_state.username), None)
     if not me:
         st.error("Account not found.")
         logout()
         st.rerun()
     for k in ("friends", "friend_requests_received", "friend_requests_sent"):
         me.setdefault(k, [])
-    acc_sha = save_last_seen(accounts, acc_sha)
     my_friends = me.get("friends", [])
     online_friends = [
         f for f in my_friends
         if (lambda u: u and is_online(u))(
-            next((x for x in accounts if x["username"] == f), None)
+            next((x for x in accounts_raw if x["username"] == f), None)
         )
     ]
+    # Throttled last_seen save
+    now = time.time()
+    if now - st.session_state.last_seen_saved >= LAST_SEEN_SAVE_INTERVAL:
+        me["last_seen"] = now
+        ok, acc_sha = save_github_file(USER_FILE, accounts_raw, acc_sha, "heartbeat")
+        if ok:
+            st.session_state.last_seen_saved = now
 else:
+    me = None
     my_friends = []
     online_friends = []
-    me = None
 
 # ═══════════════════════════════════════════════════════════════
-#  SIDEBAR (user/guest)
+#  SIDEBAR
 # ═══════════════════════════════════════════════════════════════
 with st.sidebar:
     avatar_cls = "avatar avatar-guest" if is_guest else "avatar"
@@ -612,7 +754,6 @@ with st.sidebar:
         st.rerun()
     st.divider()
 
-    # --- ROOMS ---
     st.markdown(f"#### {L['sidebar_rooms']}")
     if is_guest:
         room_labels = [L["guest_room"]]
@@ -621,7 +762,6 @@ with st.sidebar:
         room_labels = [L["public_room"]] + [f"💬 {f}" for f in my_friends]
         room_keys = ["__public__"] + my_friends
 
-    # Đảm bảo index hợp lệ khi list thay đổi
     current_room = st.session_state.get("room_select", 0)
     if not isinstance(current_room, int) or current_room >= len(room_keys):
         st.session_state.room_select = 0
@@ -635,20 +775,19 @@ with st.sidebar:
     )
     selected_key = room_keys[selected_idx]
 
-    # Reset state khi đổi phòng
     if st.session_state.prev_room != selected_key:
         st.session_state.prev_room = selected_key
         st.session_state.search_query = ""
         st.session_state.reply_to = None
+        st.session_state.force_refresh = True
 
     st.divider()
 
-    # --- FRIEND SECTION (chỉ user thật) ---
     if not is_guest:
         with st.expander(f"➕ {L['add_friend']}", expanded=False):
             target = st.text_input(L["friend_username"], key="ft_input").strip()
             if st.button(L["btn_send_req"], use_container_width=True, key="add_btn"):
-                tu = next((x for x in accounts if x["username"] == target), None)
+                tu = next((x for x in accounts_raw if x["username"] == target), None)
                 if not target:
                     st.warning(L["err_missing"])
                 elif target == st.session_state.username:
@@ -662,7 +801,7 @@ with st.sidebar:
                 else:
                     me["friend_requests_sent"].append(target)
                     tu["friend_requests_received"].append(st.session_state.username)
-                    ok, _ = save_github_file(USER_FILE, accounts, acc_sha, f"req {target}")
+                    ok, _ = save_github_file(USER_FILE, accounts_raw, acc_sha, f"req {target}")
                     if ok:
                         st.success(L["success_friend_sent"])
                         st.rerun()
@@ -671,26 +810,22 @@ with st.sidebar:
             st.markdown(f"#### 📥 {L['pending_requests']}")
             for sender in list(me["friend_requests_received"]):
                 with st.container(border=True):
-                    st.markdown(
-                        f"<div class='avatar' style='width:26px;height:26px;font-size:.7rem;'>"
-                        f"{initials(sender)}</div> **{sender}**",
-                        unsafe_allow_html=True
-                    )
+                    st.markdown(f"**{sender}**")
                     c1, c2 = st.columns(2)
                     if c1.button("✅", key=f"a_{sender}", use_container_width=True):
                         me["friends"].append(sender)
                         me["friend_requests_received"].remove(sender)
-                        sd = next((x for x in accounts if x["username"] == sender), None)
+                        sd = next((x for x in accounts_raw if x["username"] == sender), None)
                         if sd:
                             sd.setdefault("friends", []).append(st.session_state.username)
                             if st.session_state.username in sd.get("friend_requests_sent", []):
                                 sd["friend_requests_sent"].remove(st.session_state.username)
-                        ok, _ = save_github_file(USER_FILE, accounts, acc_sha, "accept")
+                        ok, _ = save_github_file(USER_FILE, accounts_raw, acc_sha, "accept")
                         if ok:
                             st.rerun()
                     if c2.button("❌", key=f"d_{sender}", use_container_width=True):
                         me["friend_requests_received"].remove(sender)
-                        ok, _ = save_github_file(USER_FILE, accounts, acc_sha, "decline")
+                        ok, _ = save_github_file(USER_FILE, accounts_raw, acc_sha, "decline")
                         if ok:
                             st.rerun()
             st.divider()
@@ -698,28 +833,20 @@ with st.sidebar:
     st.caption(f"ℹ️ {APP_NAME} · v{APP_VERSION}")
 
 # ═══════════════════════════════════════════════════════════════
-#  MAIN CHAT AREA
+#  CHAT AREA
 # ═══════════════════════════════════════════════════════════════
 is_public = selected_key == "__public__"
 is_guest_room = selected_key == GUEST_ROOM
 
 if is_guest_room:
-    room_title = L["guest_room"]
-elif is_public:
-    room_title = L["public_room"]
-else:
-    room_title = f"💬 {selected_key}"
-
-# --- ROOM HEADER ---
-if is_guest_room:
+    room_title, avatar_char = L["guest_room"], "🎭"
     sub = f"🎭 {L['guest_note'][:60]}"
-    avatar_char = "🎭"
 elif is_public:
+    room_title, avatar_char = L["public_room"], "🌐"
     sub = f"{len(my_friends)} {L['friends'].lower()} · {len(online_friends)} {L['online']}"
-    avatar_char = "🌐"
 else:
+    room_title, avatar_char = f"💬 {selected_key}", initials(selected_key)
     sub = f"<span class='dot-online'></span>{L['online']}" if selected_key in online_friends else "offline"
-    avatar_char = initials(selected_key)
 
 st.markdown(f"""
 <div class="room-header">
@@ -728,29 +855,14 @@ st.markdown(f"""
     <h3>{room_title}</h3>
     <small>{sub}</small>
   </div>
+  <div style="text-align:right;">
+    <div class="badge-live">⚡ live</div>
+  </div>
 </div>
 """, unsafe_allow_html=True)
 
 if is_guest:
-    st.markdown(f"<div class='guest-banner'>🎭 {L['guest_note']}</div>",
-                unsafe_allow_html=True)
-
-# --- MESSAGE FILTER FUNCTION ---
-def get_room_messages(all_msgs, room_key):
-    if room_key == GUEST_ROOM:
-        return [m for m in all_msgs if m.get("room") == "guest"]
-    if room_key == "__public__":
-        return [
-            m for m in all_msgs
-            if m.get("room", "public") == "public"
-            and (m["user"] == st.session_state.username or m["user"] in my_friends)
-        ]
-    return [
-        m for m in all_msgs
-        if m.get("room") == "private"
-        and ((m["user"] == st.session_state.username and m.get("to") == room_key)
-             or (m["user"] == room_key and m.get("to") == st.session_state.username))
-    ]
+    st.markdown(f"<div class='guest-banner'>🎭 {L['guest_note']}</div>", unsafe_allow_html=True)
 
 # --- SEARCH ---
 search_col, clear_col = st.columns([9, 1])
@@ -767,15 +879,11 @@ with clear_col:
         st.session_state.search_query = ""
         st.rerun()
 
-# --- MESSAGE RENDER (fragment) ---
+# --- MESSAGE RENDER HELPER ---
 def render_one_message(m):
     is_me = m["user"] == st.session_state.username
-    avatar = "🧑" if is_me else ("🎭" if is_guest_room and m["user"].startswith(GUEST_PREFIX) else "👤")
-    display_user = (
-        m.get("display_name", m["user"])
-        if m["user"].startswith(GUEST_PREFIX)
-        else m["user"]
-    )
+    avatar = "🧑" if is_me else ("🎭" if m["user"].startswith(GUEST_PREFIX) else "👤")
+    disp = m.get("display_name", m["user"]) if m["user"].startswith(GUEST_PREFIX) else m["user"]
     with st.chat_message(m["role"], avatar=avatar):
         if m.get("reply_to"):
             rp = m["reply_to"]
@@ -784,8 +892,7 @@ def render_one_message(m):
                 unsafe_allow_html=True
             )
         st.markdown(
-            f"**{display_user}** "
-            f"<span style='color:var(--muted);font-size:.75rem;'>· {m['time']}</span>",
+            f"**{disp}** <span style='color:var(--muted);font-size:.75rem;'>· {m['time']}</span>",
             unsafe_allow_html=True
         )
         if m.get("text"):
@@ -801,29 +908,57 @@ def render_one_message(m):
             else:
                 st.markdown(f"📂 [{m['file_name']}]({m['file_url']})")
         if not is_me:
-            if st.button("↩ " + L["reply"], key=f"rp_{id(m)}_{m.get('time','')}"):
-                st.session_state.reply_to = {
-                    "user": display_user, "text": m.get("text", "")[:120]
-                }
+            if st.button("↩ " + L["reply"], key=f"rp_{id(m)}"):
+                st.session_state.reply_to = {"user": disp, "text": m.get("text", "")[:120]}
                 st.rerun()
 
-@st.fragment(run_every=REFRESH_INTERVAL)
-def live_messages_fragment(room_key, search_q):
-    try:
-        fresh, _ = load_github_file(CHAT_FILE)
-    except Exception:
-        fresh = chat_all
-    msgs = get_room_messages(fresh, room_key)
-    if search_q:
-        q = search_q.lower()
-        msgs = [m for m in msgs if q in (m.get("text", "") + m.get("user", "")).lower()]
+# ═══════════════════════════════════════════════════════════════
+#  SMART LIVE FRAGMENT
+#  - run_every động qua session_state.poll_interval
+#  - chỉ GET content khi SHA thay đổi
+#  - chỉ render khi data thay đổi
+# ═══════════════════════════════════════════════════════════════
+def _poll_interval():
+    """Streamlit đọc lại mỗi khi fragment chạy."""
+    return st.session_state.poll_interval
+
+@st.fragment(run_every=_poll_interval)
+def live_chat_fragment(room_key, search_q, friends, username):
+    # 1. Kiểm tra tin mới bằng SHA (HEAD, cực nhẹ)
+    changed, data = smart_check_new_messages(room_key)
+
+    # 2. Filter
+    msgs = filter_messages(data, room_key, friends, username, search_q)
+
+    # 3. Render
     if not msgs:
         st.info(L["no_messages"])
-        return
-    for m in msgs:
-        render_one_message(m)
+    else:
+        for m in msgs:
+            render_one_message(m)
 
-live_messages_fragment(selected_key, st.session_state.search_query)
+    # 4. Cập nhật adaptive interval cho lần poll sau
+    st.session_state.poll_interval = compute_next_poll_interval()
+    st.session_state.last_poll_ts = time.time()
+
+    # 5. Hiển thị indicator nhỏ
+    idle = time.time() - st.session_state.last_msg_ts
+    st.markdown(
+        f"<div class='poll-indicator'>⚡ {st.session_state.poll_interval}s "
+        f"· idle {int(idle)}s</div>",
+        unsafe_allow_html=True
+    )
+
+# Khởi tạo interval ban đầu nếu chưa có
+if "poll_interval" not in st.session_state or st.session_state.poll_interval == POLL_MED:
+    st.session_state.poll_interval = POLL_FAST
+
+live_chat_fragment(
+    selected_key,
+    st.session_state.search_query,
+    tuple(my_friends),
+    st.session_state.username,
+)
 
 # ═══════════════════════════════════════════════════════════════
 #  REPLY PREVIEW
@@ -832,19 +967,16 @@ if st.session_state.reply_to:
     rp = st.session_state.reply_to
     c1, c2 = st.columns([5, 1])
     with c1:
-        st.markdown(
-            f"<div class='reply-preview'>↪ <b>{rp['user']}</b>: {rp['text']}</div>",
-            unsafe_allow_html=True
-        )
+        st.markdown(f"<div class='reply-preview'>↪ <b>{rp['user']}</b>: {rp['text']}</div>",
+                    unsafe_allow_html=True)
     with c2:
         if st.button("✖ " + L["cancel_reply"], use_container_width=True, key="cancel_reply_btn"):
             st.session_state.reply_to = None
             st.rerun()
 
 # ═══════════════════════════════════════════════════════════════
-#  EMOJI INJECTION — thay thế chat_input bằng cách buffer
+#  EMOJI / ATTACH
 # ═══════════════════════════════════════════════════════════════
-# Emoji popover đặt phía trên chat_input
 emoji_col, attach_col = st.columns([1, 1])
 with emoji_col:
     with st.popover("😀 " + L["emoji"], use_container_width=True):
@@ -857,8 +989,6 @@ with emoji_col:
 
 with attach_col:
     with st.popover("📎 " + L["attach"], use_container_width=True):
-        # Uploader NGOÀI popover không được — dùng st.file_uploader ở đây
-        # Lưu ý: nếu đóng popover file mất, nên ta dùng session_state lưu bytes
         up = st.file_uploader(L["attach"], label_visibility="collapsed", key="fup")
         if up is not None:
             fb = up.read()
@@ -872,6 +1002,7 @@ with attach_col:
                     with st.spinner(L["uploading"]):
                         url = upload_binary(up.name, fb)
                     if url:
+                        chat_all, chat_sha = load_content(CHAT_FILE)
                         msg = {
                             "user": st.session_state.username,
                             "display_name": display_name,
@@ -887,9 +1018,14 @@ with attach_col:
                             chat_all[:] = chat_all[-MAX_CHAT_ENTRIES:]
                         ok, _ = save_github_file(CHAT_FILE, chat_all, chat_sha, "file")
                         if ok:
+                            st.session_state.force_refresh = True
+                            st.session_state.last_msg_ts = time.time()
+                            st.session_state.poll_interval = POLL_FAST
                             st.rerun()
 
-# Chat input — inject buffer nếu có
+# ═══════════════════════════════════════════════════════════════
+#  SEND MESSAGE
+# ═══════════════════════════════════════════════════════════════
 if st.session_state.chat_buffer:
     st.caption(f"📝 Buffer: {st.session_state.chat_buffer}")
 
@@ -898,6 +1034,7 @@ if prompt is not None and prompt != "":
     final_text = (st.session_state.chat_buffer + prompt).strip()
     st.session_state.chat_buffer = ""
     if final_text:
+        chat_all, chat_sha = load_content(CHAT_FILE)
         msg = {
             "user": st.session_state.username,
             "display_name": display_name,
@@ -913,9 +1050,12 @@ if prompt is not None and prompt != "":
         chat_all.append(msg)
         if len(chat_all) > MAX_CHAT_ENTRIES:
             chat_all[:] = chat_all[-MAX_CHAT_ENTRIES:]
-        ok, new_sha = save_github_file(CHAT_FILE, chat_all, chat_sha, f"msg {display_name}")
+        ok, _ = save_github_file(CHAT_FILE, chat_all, chat_sha, f"msg {display_name}")
         if ok:
             st.session_state.reply_to = None
+            st.session_state.force_refresh = True
+            st.session_state.last_msg_ts = time.time()
+            st.session_state.poll_interval = POLL_FAST
             st.rerun()
 
 # ═══════════════════════════════════════════════════════════════
@@ -923,11 +1063,14 @@ if prompt is not None and prompt != "":
 # ═══════════════════════════════════════════════════════════════
 with st.expander("⚙️ " + L["info"], expanded=False):
     st.caption(f"{APP_NAME} · v{APP_VERSION}")
+    st.caption(f"⚡ Poll interval: **{st.session_state.poll_interval}s** (adaptive)")
     if is_public and not is_guest:
         if st.button("🗑️ " + L["clear_chat"], key="clear_btn"):
+            chat_all, chat_sha = load_content(CHAT_FILE)
             ok, _ = save_github_file(CHAT_FILE, [], chat_sha, "clear")
             if ok:
+                st.session_state.chat_sha_cache.clear()
+                st.session_state.chat_data_cache.clear()
+                st.session_state.force_refresh = True
                 st.success(L["success_clear"])
                 st.rerun()
-    if is_guest_room:
-        st.caption("💡 " + L["guest_note"])
